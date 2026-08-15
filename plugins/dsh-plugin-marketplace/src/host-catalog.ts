@@ -1,5 +1,6 @@
 import { loadRemoteCatalog, mergeCatalogs, emptyRemoteCatalog, type Catalog } from './catalog.ts'
 import { loadDshPlugsPlugins } from './local-source.ts'
+import { ensureOmdsh } from './omdsh.ts'
 import { markInstalled } from './profile-inventory.ts'
 
 let cache: { at: number; catalog: Catalog } | null = null
@@ -15,7 +16,7 @@ export async function loadMergedCatalog(force = false): Promise<Catalog> {
   } catch {
     remote = emptyRemoteCatalog()
   }
-  const catalog = markInstalled(mergeCatalogs(local, remote))
+  const catalog = markInstalled(await ensureOmdsh(mergeCatalogs(local, remote)))
   if (catalog.plugins.length === 0) throw new Error('catalog unavailable')
   cache = { at: now, catalog }
   return catalog

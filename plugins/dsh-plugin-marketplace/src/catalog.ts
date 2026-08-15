@@ -3,6 +3,7 @@ import {
   DSH_PLUGS_PLUGINS,
   DSH_PLUGS_SOURCE,
   DSH_PLUGS_URL,
+  OMDSH_SOURCE,
   githubPathSpec,
   pluginUrl,
   type ProfilePatch,
@@ -29,10 +30,14 @@ export const CATEGORY_LABELS: Record<string, LocalizedText> = {
   notify: { en: 'Notifications & Integrations', zh: '通知与集成' },
   dev: { en: 'Development & Runtime', zh: '开发与运行时' },
   fun: { en: 'Just for Fun', zh: '娱乐' },
+  memory: { en: 'Memory', zh: '记忆' },
+  model: { en: 'Models', zh: '模型' },
+  theme: { en: 'Themes', zh: '主题' },
 }
 
 export const SOURCE_LABELS: Record<string, LocalizedText> = {
   [DSH_PLUGS_SOURCE]: { en: 'DSH-Plugs', zh: 'DSH-Plugs' },
+  [OMDSH_SOURCE]: { en: 'omdsh-dev', zh: 'omdsh-dev' },
   [AWESOME_SOURCE]: { en: 'awesome-dsh-plugin', zh: 'awesome-dsh-plugin' },
 }
 

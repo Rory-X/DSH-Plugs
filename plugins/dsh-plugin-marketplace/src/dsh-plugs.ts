@@ -3,6 +3,9 @@ export const DSH_PLUGS_REPO = 'Rory-X/DSH-Plugs'
 export const DSH_PLUGS_URL = 'https://github.com/Rory-X/DSH-Plugs'
 export const DSH_PLUGS_SOURCE = 'dsh-plugs'
 export const AWESOME_SOURCE = 'awesome'
+export const OMDSH_OWNER = 'omdsh-dev'
+export const OMDSH_SOURCE = 'omdsh-dev'
+export const OMDSH_URL = 'https://github.com/omdsh-dev'
 
 export interface ProfilePatch {
   id: string
@@ -42,8 +45,26 @@ export const DSH_PLUGS_PLUGINS: readonly DshPlugsPluginDef[] = [
     packageName: '@just-genius/dsh-plugin-marketplace',
     category: 'ui',
     description: {
-      en: 'Settings → Plugins marketplace tab. Browses this repo plus the awesome-dsh-plugin catalog.',
-      zh: '设置 → 插件中的市场页。浏览本仓库与 awesome-dsh-plugin 目录。',
+      en: 'Settings → Plugins marketplace tab. Browses this repo, omdsh-dev, and the awesome-dsh-plugin catalog.',
+      zh: '设置 → 插件中的市场页。浏览本仓库、omdsh-dev 与 awesome-dsh-plugin 目录。',
+    },
+  },
+  {
+    folder: 'dsh-mobile-web',
+    packageName: '@just-genius/dsh-mobile-web',
+    category: 'ui',
+    description: {
+      en: 'Phone layout for the official Web UI: drawer sidebar, overlay details, hamburger, safe areas, and keyboard avoidance.',
+      zh: '让官方 Web UI 能在手机上用：侧栏改抽屉、详情改全屏层、汉堡按钮、安全区与键盘避让。',
+    },
+  },
+  {
+    folder: 'dsh-wechat-chat',
+    packageName: '@just-genius/dsh-wechat-chat',
+    category: 'ui',
+    description: {
+      en: 'WeChat-style chat skin: sessions become chats, the agent texts short progress bubbles, and you can switch back from Me.',
+      zh: '微信风格聊天皮肤：会话变成聊天，对面像真人一样用短气泡汇报进度，可从「我」切回经典界面。',
     },
   },
 ]

@@ -10,7 +10,7 @@ import {
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { MenuEntry } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { Catalog, CatalogPlugin } from '../catalog.ts'
-import { AWESOME_SOURCE, DSH_PLUGS_SOURCE, DSH_PLUGS_URL } from '../dsh-plugs.ts'
+import { AWESOME_SOURCE, DSH_PLUGS_SOURCE, DSH_PLUGS_URL, OMDSH_SOURCE, OMDSH_URL } from '../dsh-plugs.ts'
 import type { MarketplaceKey } from './locales.ts'
 import { isInstalled, specOf, type InventoryEntry } from './match.ts'
 import styles from './MarketplaceTab.module.css'
@@ -48,13 +48,14 @@ interface SourceGroup {
 
 function sourceHref(id: string, catalog: Catalog): string | null {
   if (id === DSH_PLUGS_SOURCE) return DSH_PLUGS_URL
+  if (id === OMDSH_SOURCE) return OMDSH_URL
   if (id === AWESOME_SOURCE) return catalog.url || 'https://awesome-dsh-plugin.com/'
   return null
 }
 
 function sourceOrder(catalog: Catalog): string[] {
   const ids = Object.keys(catalog.sources)
-  const preferred = [DSH_PLUGS_SOURCE, AWESOME_SOURCE]
+  const preferred = [DSH_PLUGS_SOURCE, OMDSH_SOURCE, AWESOME_SOURCE]
   return [
     ...preferred.filter((id) => ids.includes(id)),
     ...ids.filter((id) => !preferred.includes(id)),

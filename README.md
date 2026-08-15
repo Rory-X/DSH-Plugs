@@ -6,7 +6,7 @@ A monorepo of plugins for the [DeepSeek Harness](https://github.com/deepseek-ai/
 
 ### [@just-genius/dsh-session-navigator](plugins/session-navigator)
 
-A Codex-style message navigator rail: a vertical tick rail on the conversation transcript with one tick per user message, active highlight, stepped hover, and smooth jump.
+A Codex-style message navigator rail: a vertical tick rail on the conversati.on transcript with one tick per user message, active highlight, stepped hover, and smooth jump.
 
 ![Session navigator](public/session-nav.png)
 
@@ -18,7 +18,15 @@ Replaces the official Models settings page (fork of `ui-settings-models`) to add
 
 ### [@just-genius/dsh-plugin-marketplace](plugins/dsh-plugin-marketplace)
 
-Adds a Marketplace tab to **Settings → Plugins**. It browses this repo plus the [awesome-dsh-plugin](https://awesome-dsh-plugin.com/) catalog, marks already-installed plugins, and can copy or run the catalog install command (restart required).
+Adds a Marketplace tab to **Settings → Plugins**. It browses this repo, [omdsh-dev](https://github.com/omdsh-dev), and the [awesome-dsh-plugin](https://awesome-dsh-plugin.com/) catalog, marks already-installed plugins, and can copy or run the catalog install command (restart required).
+
+### [@just-genius/dsh-mobile-web](plugins/dsh-mobile-web)
+
+Adapts the official three-column Web UI for phones: the sidebar becomes a drawer with a hamburger, details open as a full-screen sheet, and the composer respects safe areas plus the on-screen keyboard.
+
+### [@just-genius/dsh-wechat-chat](plugins/dsh-wechat-chat)
+
+Turns the web surface into a WeChat-style messenger: chat list, green/white bubbles, and an agent that texts short progress updates while it works. Switch back from 我.
 
 ## Repository layout
 

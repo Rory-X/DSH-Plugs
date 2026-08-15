@@ -1,7 +1,8 @@
 # @just-genius/dsh-plugin-marketplace
 
-Adds a **Marketplace** tab to DSH **Settings → Plugins**. It merges two sources:
-this [DSH-Plugs](https://github.com/Rory-X/DSH-Plugs) monorepo, and the curated
+Adds a **Marketplace** tab to DSH **Settings → Plugins**. It merges three sources:
+this [DSH-Plugs](https://github.com/Rory-X/DSH-Plugs) monorepo, the
+[omdsh-dev](https://github.com/omdsh-dev) GitHub org, and the curated
 [awesome-dsh-plugin](https://awesome-dsh-plugin.com/) registry. It marks plugins
 already present in the web profile (`package.json`) and the live Loader
 inventory, and can copy or run the catalog install command.
@@ -12,8 +13,9 @@ The official **Plugin configuration** and **Plugin list** tabs are left in place
 
 - Registers `settings.plugins.tab` with `id: marketplace` (order 5).
 - Host `GET /dsh-plugin-marketplace/catalog` merges this repo's plugins
-  (local `plugins/*` when linked, otherwise `github:Rory-X/DSH-Plugs#path:…`)
-  in front of `https://awesome-dsh-plugin.com/plugins.json`.
+  (local `plugins/*` when linked, otherwise `github:Rory-X/DSH-Plugs#path:…`),
+  [omdsh-dev](https://github.com/omdsh-dev) repos tagged `dsh-plugin`, and
+  `https://awesome-dsh-plugin.com/plugins.json`.
 - Client falls back to the same merge if the Host proxy is down.
 - Shows source chips, categories, search, and bilingual descriptions.
 - Tags **Installed** from the web profile (`dependencies` / `dsh.profile.bundles`) and the live Loader inventory (`pluginInventory.list()`). Matches npm name, GitHub spec (`github:owner/repo`), and local `link:` paths.

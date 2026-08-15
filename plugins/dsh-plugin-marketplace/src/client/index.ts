@@ -13,6 +13,7 @@ import {
   parseCatalog,
   type Catalog,
 } from '../catalog.ts'
+import { ensureOmdsh } from '../omdsh.ts'
 import { MarketplaceTab, type InstallOutcome, type MarketplaceTabInjected } from './MarketplaceTab.tsx'
 import { en, zh, type MarketplaceKey } from './locales.ts'
 import type { InventoryEntry } from './match.ts'
@@ -37,7 +38,7 @@ export function apply(ctx: ClientContext): void {
         cache: 'no-store',
         headers: { accept: 'application/json' },
       })
-      if (response.ok) return ensureDshPlugs(parseCatalog(await response.json()))
+      if (response.ok) return ensureOmdsh(ensureDshPlugs(parseCatalog(await response.json())))
     } catch {
       // Fall through: merge this repo's GitHub entries with the public registry.
     }
@@ -51,7 +52,7 @@ export function apply(ctx: ClientContext): void {
     } catch {
       // Local GitHub entries still render if awesome-dsh-plugin is unreachable.
     }
-    return mergeCatalogs(dshPlugsRemotePlugins(), remote)
+    return ensureOmdsh(mergeCatalogs(dshPlugsRemotePlugins(), remote))
   }
 
   const listInstalled = async (): Promise<InventoryEntry[]> => {
