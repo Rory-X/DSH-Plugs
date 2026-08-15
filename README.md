@@ -16,6 +16,10 @@ Replaces the official Models settings page (fork of `ui-settings-models`) to add
 
 ![Custom Models settings](public/model-custom-ex.png)
 
+### [@just-genius/dsh-mobile-web](plugins/dsh-mobile-web)
+
+Adapts the official three-column Web UI for phones: the sidebar becomes a drawer with a hamburger, details open as a full-screen sheet, and the composer respects safe areas plus the on-screen keyboard.
+
 ## Repository layout
 
 ```
