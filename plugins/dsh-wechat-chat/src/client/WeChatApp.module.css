@@ -113,6 +113,14 @@
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.columnFill {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
 }
 
 .listHead {
@@ -176,6 +184,7 @@
 
 .list {
   flex: 1;
+  min-height: 0;
   overflow: auto;
 }
 
@@ -302,6 +311,7 @@
 .chat {
   flex: 1;
   min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   background: var(--wx-chat);
@@ -350,8 +360,26 @@
   margin-top: 2px;
 }
 
+.modelChip {
+  flex: none;
+  max-width: 132px;
+  height: 28px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--wx-hover);
+  color: var(--wx-muted);
+  font-size: 12px;
+  font-weight: 560;
+  padding: 0 10px;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .thread {
   flex: 1;
+  min-height: 0;
   overflow: auto;
   padding: 18px 0 10px;
   background-image:
@@ -890,6 +918,92 @@
   font-size: 14px;
 }
 
+.effortRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 16px 12px;
+}
+
+.effortChip {
+  border: 0;
+  border-radius: 999px;
+  height: 26px;
+  padding: 0 10px;
+  background: var(--wx-bg);
+  color: var(--wx-muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.effortChip[data-on='true'] {
+  background: rgba(7, 193, 96, 0.16);
+  color: #06733a;
+}
+
+.sheetMask {
+  position: fixed;
+  inset: 0;
+  z-index: 2147483001;
+  background: rgba(0, 0, 0, 0.38);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+.sheet {
+  width: min(420px, 100%);
+  background: var(--wx-card);
+  border-radius: 18px 18px 0 0;
+  padding: 8px 0 calc(12px + env(safe-area-inset-bottom));
+  box-shadow: 0 -12px 40px rgba(0, 0, 0, 0.18);
+}
+
+.sheetTitle {
+  padding: 12px 18px 8px;
+  font-size: 13px;
+  color: var(--wx-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sheetBtn {
+  width: 100%;
+  border: 0;
+  border-top: 1px solid var(--wx-line);
+  background: transparent;
+  padding: 14px 18px;
+  font-size: 16px;
+  text-align: center;
+  cursor: pointer;
+  color: inherit;
+}
+
+.sheetDanger {
+  color: #fa5151;
+}
+
+.sheetCancel {
+  color: var(--wx-muted);
+}
+
+.renameInput {
+  display: block;
+  width: calc(100% - 36px);
+  margin: 4px 18px 12px;
+  height: 40px;
+  border: 0;
+  border-radius: 12px;
+  background: var(--wx-bg);
+  padding: 0 12px;
+  font: inherit;
+  font-size: 15px;
+  color: inherit;
+  outline: none;
+  box-sizing: border-box;
+}
+
 @keyframes blink {
   50% { opacity: 0; }
 }
@@ -940,6 +1054,10 @@
   }
 
   .choice[data-on='true'] {
+    color: #8ef0b3;
+  }
+
+  .effortChip[data-on='true'] {
     color: #8ef0b3;
   }
 

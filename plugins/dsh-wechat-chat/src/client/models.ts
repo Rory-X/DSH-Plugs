@@ -1,9 +1,15 @@
+export interface ModelEffort {
+  id: string
+  name: string
+}
+
 export interface ModelPick {
   provider: string
   model: string
   name: string
   group: string
   reasoningEffort?: string
+  efforts: readonly ModelEffort[]
 }
 
 export interface ModelSnapshot {
@@ -14,7 +20,10 @@ export interface ModelSnapshot {
     models: readonly {
       id: string
       name: string
-      reasoning?: { defaultEffort?: string }
+      reasoning?: {
+        defaultEffort?: string
+        efforts?: readonly { id: string; name: string }[]
+      }
     }[]
   }[]
   status: 'idle' | 'loading' | 'ready' | 'selecting' | 'error'
@@ -41,11 +50,16 @@ export function picksOf(state: ModelSnapshot): ModelPick[] {
   const picks: ModelPick[] = []
   for (const group of state.groups) {
     for (const model of group.models) {
+      const efforts = (model.reasoning?.efforts ?? []).map((effort) => ({
+        id: effort.id,
+        name: effort.name || effort.id,
+      }))
       picks.push({
         provider: group.id,
         model: model.id,
         name: model.name || model.id,
         group: group.name || group.id,
+        efforts,
         ...model.reasoning?.defaultEffort === undefined ? {} : { reasoningEffort: model.reasoning.defaultEffort },
       })
     }
@@ -66,4 +80,9 @@ export function labelOf(state: ModelSnapshot, fallback: string): string {
 
 export function samePick(pick: ModelPick, current: ModelSnapshot['current']): boolean {
   return current !== null && pick.provider === current.provider && pick.model === current.model
+}
+
+export function currentEffortOf(state: ModelSnapshot, pick: ModelPick): string | undefined {
+  if (!samePick(pick, state.current)) return pick.reasoningEffort
+  return state.current?.reasoningEffort ?? pick.reasoningEffort
 }

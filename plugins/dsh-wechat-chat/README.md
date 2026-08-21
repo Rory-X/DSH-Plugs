@@ -8,8 +8,7 @@ agent transcript.
 
 ## What you get
 
-- **WeChat desktop chrome**: dark icon rail, chat list, beige thread, green
-  send button, green/white bubbles with tails.
+- **WeChat desktop chrome**: dark icon rail, chat list with last-message preview, beige thread, green send pill, green/white bubbles.
 - **Human progress**: tool calls render as gray center tips (`正在看 package.json`),
   assistant text splits on blank lines into multiple bubbles, and a live
   “对方正在输入” row appears while the agent is working.
@@ -17,6 +16,9 @@ agent transcript.
   texts short updates as it works, instead of dumping one essay.
 - **Approvals / questions**: WeChat cards with Allow / Decline (and option
   buttons for ask-user questions).
+- **Me → models**: switch the current chat and the default for new chats; thinking strength chips appear when the adapter exposes them.
+- **Discover → Moments**: cover, camera, and a feed of recent chats (live / needs you).
+- **Chat actions**: right-click or ⋯ to rename or delete (archive) a chat.
 - **Escape hatch**: 我 → 切换回经典界面. A green WeChat FAB brings the skin back.
 
 ## How it works
@@ -42,7 +44,7 @@ Then add it to the web profile (restart required after the first install):
 # from this monorepo
 # 1. link the package in ~/.dsh/profiles/web/package.json
 # 2. pnpm install in that profile
-# 3. restart DSH web, then refresh http://127.0.0.1:62320
+# 3. restart DSH web, then refresh the existing GUI URL
 ```
 
 ## Install via LLM

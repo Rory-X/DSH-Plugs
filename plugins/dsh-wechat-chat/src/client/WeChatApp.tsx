@@ -23,6 +23,7 @@ import {
 } from './project.ts'
 import {
   EMPTY_MODELS,
+  currentEffortOf,
   labelOf,
   picksOf,
   samePick,
@@ -76,35 +77,59 @@ export function WeChatApp(props: WeChatAppProps) {
   const [tab, setTab] = useState<Tab>('chats')
   const [query, setQuery] = useState('')
   const [mobileChat, setMobileChat] = useState(false)
+  const [menu, setMenu] = useState<{ id: SessionId; title: string } | null>(null)
+  const [rename, setRename] = useState<{ id: SessionId; title: string } | null>(null)
 
   const allChats = useMemo(
     () => ids.map((id) => byId[id]).filter((row) => row && !row.blank && row.origin !== 'subagent'),
     [ids, byId],
   )
-  const chats = useMemo(() => {
-    const needle = query.trim().toLowerCase()
-    if (!needle) return allChats
-    return allChats.filter((row) => row.displayTitle.toLowerCase().includes(needle))
-  }, [allChats, query])
 
   const binding = useBinding(current, props.bindingOf)
   const snapshot = useLiveSnapshot(binding?.session)
   const items = useMemo(() => projectChat(snapshot, t), [snapshot, t])
   const modelSessionId = current ?? ids.find((id) => byId[id] && byId[id].origin !== 'subagent')
   const recentIds = useMemo(
-    () => allChats.slice().sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 12).map((row) => row.id),
+    () => allChats.slice().sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 24).map((row) => row.id),
     [allChats],
   )
   const snapshots = useRecentSnapshots(recentIds, props.bindingOf)
-  const moments = useMemo(
-    () => projectMoments(allChats, { ...snapshots, ...current ? { [current]: snapshot } : {} }, t),
-    [allChats, snapshots, current, snapshot, t],
+  const mergedSnaps = useMemo(
+    () => ({ ...snapshots, ...current ? { [current]: snapshot } : {} }),
+    [snapshots, current, snapshot],
   )
+  const moments = useMemo(
+    () => projectMoments(allChats, mergedSnaps, t),
+    [allChats, mergedSnaps, t],
+  )
+  const previewById = useMemo(() => {
+    const map: Record<string, string> = {}
+    for (const row of allChats) {
+      const snap = mergedSnaps[row.id]
+      map[row.id] = lastPreview(row.id === current ? items : projectChat(snap, t), row, t)
+    }
+    return map
+  }, [allChats, mergedSnaps, current, items, t])
+  const chats = useMemo(() => {
+    const needle = query.trim().toLowerCase()
+    if (!needle) return allChats
+    return allChats.filter((row) => {
+      const hay = `${row.displayTitle}\n${previewById[row.id] ?? ''}`
+      return hay.toLowerCase().includes(needle)
+    })
+  }, [allChats, query, previewById])
 
   const openChat = (id: SessionId) => {
     props.open(id)
     setTab('chats')
     setMobileChat(true)
+    setMenu(null)
+  }
+
+  const archiveChat = async (id: SessionId) => {
+    setMenu(null)
+    await props.archiveSession(id)
+    if (id === current) setMobileChat(false)
   }
 
   useEffect(() => {
@@ -170,7 +195,11 @@ export function WeChatApp(props: WeChatAppProps) {
                   className={styles.row}
                   data-active={row.id === current}
                   data-live={row.running}
-                  onClick={() => { props.open(row.id); setMobileChat(true) }}
+                  onClick={() => openChat(row.id)}
+                  onContextMenu={(event) => {
+                    event.preventDefault()
+                    setMenu({ id: row.id, title: row.displayTitle })
+                  }}
                 >
                   <Avatar id={row.id} title={row.displayTitle} />
                   <div className={styles.rowBody}>
@@ -178,9 +207,7 @@ export function WeChatApp(props: WeChatAppProps) {
                       <div className={styles.rowName}>{row.displayTitle}</div>
                       <div className={styles.rowTime}>{formatClock(row.updatedAt, t)}</div>
                     </div>
-                    <div className={styles.rowPreview}>
-                      {row.id === current ? lastPreview(items, row, t) : lastPreview([], row, t)}
-                    </div>
+                    <div className={styles.rowPreview}>{previewById[row.id] ?? lastPreview([], row, t)}</div>
                   </div>
                   {row.pendingInteraction && <span className={styles.badge} />}
                   {!row.pendingInteraction && row.completed && <span className={`${styles.badge} ${styles.badgeDone}`} />}
@@ -194,7 +221,7 @@ export function WeChatApp(props: WeChatAppProps) {
           <>
             <div className={styles.listHead}>
               <div className={styles.listTitle}>{t('tab.contacts')}</div>
-              <button type="button" className={styles.iconBtn} title={t('pickFolder')} onClick={() => void addWorkspace(props)}>
+              <button type="button" className={styles.iconBtn} title={t('pickFolder')} onClick={() => void addWorkspace(props, openChat)}>
                 <IconPlus />
               </button>
             </div>
@@ -206,7 +233,7 @@ export function WeChatApp(props: WeChatAppProps) {
                   key={ws.workspaceId}
                   type="button"
                   className={styles.row}
-                  onClick={() => void openWorkspace(props, ws.workspaceId)}
+                  onClick={() => void openWorkspace(props, ws.workspaceId, openChat)}
                 >
                   <Avatar id={ws.workspaceId} title={ws.title || ws.path || ws.workspaceId} />
                   <div className={styles.rowBody}>
@@ -230,7 +257,7 @@ export function WeChatApp(props: WeChatAppProps) {
                   <span className={`${styles.discoverIcon} ${styles.discoverMoments}`}><IconCameraMini /></span>
                   {t('discoverTitle')}
                 </button>
-                <button type="button" className={styles.menuBtn} onClick={() => void addWorkspace(props)}>
+                <button type="button" className={styles.menuBtn} onClick={() => void addWorkspace(props, openChat)}>
                   <span className={`${styles.discoverIcon} ${styles.discoverScan}`}><IconScan /></span>
                   {t('discover.scan')}
                 </button>
@@ -249,7 +276,7 @@ export function WeChatApp(props: WeChatAppProps) {
         )}
 
         {tab === 'me' && (
-          <>
+          <div className={styles.columnFill}>
             <MePanel
               t={t}
               sessionId={modelSessionId}
@@ -257,7 +284,7 @@ export function WeChatApp(props: WeChatAppProps) {
               saveDefaultModel={props.saveDefaultModel}
               onClassic={() => setEnabled(false)}
             />
-          </>
+          </div>
         )}
       </aside>
 
@@ -269,7 +296,7 @@ export function WeChatApp(props: WeChatAppProps) {
             onOpen={openChat}
             onPost={() => props.startSession(recentWorkspaceId)}
           />
-        ) : tab !== 'chats' || !current ? (
+        ) : !current ? (
           <div className={styles.paneEmpty}>
             <div className={styles.emptyMark}><WeChatMark /></div>
             <p>{workspaces.length === 0 ? t('noWorkspace') : t('emptyChat')}</p>
@@ -283,8 +310,28 @@ export function WeChatApp(props: WeChatAppProps) {
                 <div className={styles.chatName}>{title}</div>
                 {subtitle && <div className={styles.chatSub}>{subtitle}</div>}
               </div>
+              <ModelChip
+                t={t}
+                sessionId={current}
+                directoryFor={props.directoryFor}
+                onClick={() => setTab('me')}
+              />
+              <button
+                type="button"
+                className={styles.iconBtn}
+                title={t('chat.more')}
+                onClick={() => setMenu({ id: current, title })}
+              >
+                <IconMore />
+              </button>
             </header>
-            <Thread items={items} t={t} />
+            <Thread
+              items={items}
+              t={t}
+              hasMore={Boolean(snapshot?.hasMore)}
+              loadingOlder={Boolean(snapshot?.loadingOlder)}
+              onLoadOlder={() => void binding?.session.loadOlder()}
+            />
             <Composer
               t={t}
               running={Boolean(snapshot?.running)}
@@ -310,6 +357,30 @@ export function WeChatApp(props: WeChatAppProps) {
           <IconMe />
         </RailButton>
       </nav>
+      {menu && (
+        <ActionSheet
+          t={t}
+          title={menu.title}
+          onClose={() => setMenu(null)}
+          onRename={() => {
+            setRename({ id: menu.id, title: menu.title })
+            setMenu(null)
+          }}
+          onArchive={() => void archiveChat(menu.id)}
+        />
+      )}
+      {rename && (
+        <RenameSheet
+          t={t}
+          title={rename.title}
+          onClose={() => setRename(null)}
+          onSave={(title) => {
+            const id = rename.id
+            setRename(null)
+            void props.bindingOf(id)?.session.rename(title)
+          }}
+        />
+      )}
     </div>,
   )
 }
@@ -317,6 +388,82 @@ export function WeChatApp(props: WeChatAppProps) {
 function toBody(node: ReactNode) {
   if (typeof document === 'undefined' || document.body === null) return node
   return createPortal(node, document.body)
+}
+
+function ModelChip({ t, sessionId, directoryFor, onClick }: {
+  t: (key: WeChatKey) => string
+  sessionId: string
+  directoryFor?: (id: string) => ModelDirectoryFace | undefined
+  onClick: () => void
+}) {
+  const directory = useMemo(() => {
+    if (!directoryFor) return undefined
+    try { return directoryFor(sessionId) } catch { return undefined }
+  }, [sessionId, directoryFor])
+  const state = useSyncExternalStore(
+    (fn) => directory?.store.subscribe(fn) ?? (() => {}),
+    () => directory?.store.getSnapshot() ?? EMPTY_MODELS,
+  )
+  useEffect(() => {
+    if (!directory) return
+    void directory.load()
+  }, [directory])
+  const label = labelOf(state, t('me.model'))
+  return (
+    <button type="button" className={styles.modelChip} title={t('me.model')} onClick={onClick}>
+      {label}
+    </button>
+  )
+}
+
+function ActionSheet({ t, title, onClose, onRename, onArchive }: {
+  t: (key: WeChatKey) => string
+  title: string
+  onClose: () => void
+  onRename: () => void
+  onArchive: () => void
+}) {
+  return (
+    <div className={styles.sheetMask} onClick={onClose} role="presentation">
+      <div className={styles.sheet} onClick={(event) => event.stopPropagation()}>
+        <div className={styles.sheetTitle}>{title}</div>
+        <button type="button" className={styles.sheetBtn} onClick={onRename}>{t('chat.rename')}</button>
+        <button type="button" className={`${styles.sheetBtn} ${styles.sheetDanger}`} onClick={onArchive}>{t('chat.archive')}</button>
+        <button type="button" className={`${styles.sheetBtn} ${styles.sheetCancel}`} onClick={onClose}>{t('chat.cancel')}</button>
+      </div>
+    </div>
+  )
+}
+
+function RenameSheet({ t, title, onClose, onSave }: {
+  t: (key: WeChatKey) => string
+  title: string
+  onClose: () => void
+  onSave: (title: string) => void
+}) {
+  const [draft, setDraft] = useState(title)
+  const ready = draft.trim().length > 0
+  return (
+    <div className={styles.sheetMask} onClick={onClose} role="presentation">
+      <div className={styles.sheet} onClick={(event) => event.stopPropagation()}>
+        <div className={styles.sheetTitle}>{t('chat.rename')}</div>
+        <input
+          className={styles.renameInput}
+          value={draft}
+          autoFocus
+          onChange={(event) => setDraft(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter' && ready) onSave(draft.trim())
+            if (event.key === 'Escape') onClose()
+          }}
+        />
+        <button type="button" className={styles.sheetBtn} disabled={!ready} onClick={() => onSave(draft.trim())}>
+          {t('chat.renameSave')}
+        </button>
+        <button type="button" className={`${styles.sheetBtn} ${styles.sheetCancel}`} onClick={onClose}>{t('chat.cancel')}</button>
+      </div>
+    </div>
+  )
 }
 
 function MePanel({ t, sessionId, directoryFor, saveDefaultModel, onClassic }: {
@@ -388,6 +535,22 @@ function MePanel({ t, sessionId, directoryFor, saveDefaultModel, onClassic }: {
                 <span className={styles.modelName}>{pick.name}</span>
                 {samePick(pick, state.current) && <span className={styles.modelTick}>✓</span>}
               </button>
+              {samePick(pick, state.current) && pick.efforts.length > 0 && (
+                <div className={styles.effortRow}>
+                  {pick.efforts.map((effort) => (
+                    <button
+                      key={effort.id}
+                      type="button"
+                      className={styles.effortChip}
+                      data-on={currentEffortOf(state, pick) === effort.id}
+                      disabled={state.status === 'selecting'}
+                      onClick={() => void choose({ ...pick, reasoningEffort: effort.id })}
+                    >
+                      {effort.name}
+                    </button>
+                  ))}
+                </div>
+              )}
             </div>
           )
         })}
@@ -430,12 +593,23 @@ function Avatar({ id, title }: { id: string; title: string }) {
   )
 }
 
-function Thread({ items, t }: { items: WeChatItem[]; t: (key: WeChatKey) => string }) {
+function Thread({ items, t, hasMore, loadingOlder, onLoadOlder }: {
+  items: WeChatItem[]
+  t: (key: WeChatKey) => string
+  hasMore: boolean
+  loadingOlder: boolean
+  onLoadOlder: () => void
+}) {
   const ref = useRef<HTMLDivElement | null>(null)
+  const stickRef = useRef(true)
+  const heightRef = useRef(0)
+
   useEffect(() => {
     const el = ref.current
     if (!el) return
-    el.scrollTop = el.scrollHeight
+    if (stickRef.current) el.scrollTop = el.scrollHeight
+    else if (heightRef.current) el.scrollTop += el.scrollHeight - heightRef.current
+    heightRef.current = el.scrollHeight
   }, [items])
 
   if (items.length === 0) {
@@ -448,7 +622,19 @@ function Thread({ items, t }: { items: WeChatItem[]; t: (key: WeChatKey) => stri
   }
 
   return (
-    <div className={styles.thread} ref={ref}>
+    <div
+      className={styles.thread}
+      ref={ref}
+      onScroll={() => {
+        const el = ref.current
+        if (!el) return
+        stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48
+        if (el.scrollTop < 56 && hasMore && !loadingOlder) {
+          heightRef.current = el.scrollHeight
+          onLoadOlder()
+        }
+      }}
+    >
       {items.map((item, index) => {
         if (item.kind === 'time') return <div key={item.id} className={styles.time}><span>{item.label}</span></div>
         if (item.kind === 'tip') return <div key={item.id} className={styles.tip}><span>{item.text}</span></div>
@@ -619,7 +805,15 @@ function Composer({ t, running, disabled, onSend, onStop }: {
   onStop: () => void
 }) {
   const [draft, setDraft] = useState('')
+  const inputRef = useRef<HTMLTextAreaElement | null>(null)
   const ready = draft.trim().length > 0 && !disabled
+
+  useEffect(() => {
+    const el = inputRef.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = `${Math.min(Math.max(el.scrollHeight, 40), 140)}px`
+  }, [draft])
 
   const submit = (event?: FormEvent) => {
     event?.preventDefault()
@@ -640,8 +834,9 @@ function Composer({ t, running, disabled, onSend, onStop }: {
     <form className={styles.composer} onSubmit={submit}>
       <div className={styles.field}>
         <textarea
+          ref={inputRef}
           className={styles.input}
-          rows={2}
+          rows={1}
           value={draft}
           disabled={disabled}
           placeholder={t('composer')}
@@ -666,17 +861,27 @@ async function sendPrompt(binding: SessionBinding | undefined, text: string) {
   await binding.session.prompt([{ type: 'text', text }], 'queue')
 }
 
-async function addWorkspace(props: WeChatAppProps) {
+async function addWorkspace(props: WeChatAppProps, openChat: (id: SessionId) => void) {
   const path = await props.pickDirectory()
   if (!path) return
   const ws = await props.createWorkspace(path)
   const sessionId = await props.connectWorkspace(ws.workspaceId)
-  props.open(sessionId)
+  openChat(sessionId)
 }
 
-async function openWorkspace(props: WeChatAppProps, id: WorkspaceId) {
+async function openWorkspace(props: WeChatAppProps, id: WorkspaceId, openChat: (id: SessionId) => void) {
   const sessionId = await props.connectWorkspace(id)
-  props.open(sessionId)
+  openChat(sessionId)
+}
+
+function IconMore() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+      <circle cx="3.5" cy="8" r="1.4" />
+      <circle cx="8" cy="8" r="1.4" />
+      <circle cx="12.5" cy="8" r="1.4" />
+    </svg>
+  )
 }
 
 function IconPlus() {

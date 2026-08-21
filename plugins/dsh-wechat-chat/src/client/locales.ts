@@ -36,6 +36,14 @@ export type WeChatKey =
   | 'me.modelLoading'
   | 'me.modelNeedChat'
   | 'me.modelFailed'
+  | 'me.effort'
+  | 'chat.more'
+  | 'chat.archive'
+  | 'chat.rename'
+  | 'chat.renameSave'
+  | 'chat.cancel'
+  | 'sendFailed'
+  | 'stopFailed'
   | 'fab'
   | 'contactsHint'
   | 'discoverTitle'
@@ -89,6 +97,14 @@ export const zh: Record<WeChatKey, string> = {
   'me.modelLoading': '正在拉模型列表…',
   'me.modelNeedChat': '先开一场聊天，才能切模型。',
   'me.modelFailed': '这次没换成',
+  'me.effort': '思考强度',
+  'chat.more': '更多',
+  'chat.archive': '删除聊天',
+  'chat.rename': '设置备注',
+  'chat.renameSave': '完成',
+  'chat.cancel': '取消',
+  sendFailed: '这条没发出去',
+  stopFailed: '没停住',
   fab: '回到微信',
   contactsHint: '每个工作区是一位联系人。点开就会开一场新聊天。',
   discoverTitle: '朋友圈',
@@ -143,6 +159,14 @@ export const en: Record<WeChatKey, string> = {
   'me.modelLoading': 'Loading models…',
   'me.modelNeedChat': 'Start a chat first, then you can switch models.',
   'me.modelFailed': 'Could not switch',
+  'me.effort': 'Thinking',
+  'chat.more': 'More',
+  'chat.archive': 'Delete chat',
+  'chat.rename': 'Set name',
+  'chat.renameSave': 'Done',
+  'chat.cancel': 'Cancel',
+  sendFailed: 'Message failed to send',
+  stopFailed: 'Could not stop',
   fab: 'Open WeChat',
   contactsHint: 'Each workspace is a contact. Tap to start a new chat.',
   discoverTitle: 'Moments',

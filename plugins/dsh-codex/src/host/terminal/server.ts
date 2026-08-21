@@ -263,9 +263,33 @@ export async function openSession(
 
   // Configure the shell: quiet input echo, colored output, and a prompt hook
   // that reports the exit status and current directory. PS1 stays empty so
-  // the shell itself draws no  the client renders the Warp-style one.
+  // the shell itself draws no prompt; the client renders the Warp-style one.
   const setup = setupScript(shell)
   await handle.write(setup)
+
+  // The first block-end marker flips the session ready (see onTerminalData).
+  // If the shell's prompt hook never fires (e.g. an exotic rc file neutered
+  // the hook), the client would otherwise sit on its loading screen forever,
+  // so unblock it after a short grace period.
+  const readyFallback = setTimeout(() => {
+    if (session.closed || session.ready) return
+    session.ready = true
+    send(session.ws, {
+      type: 'ready',
+      cwd: session.cwd,
+      shell: session.shell,
+      rows: session.rows,
+      cols: session.cols,
+    })
+    sendHistoryIfReady(session)
+    void updateContext(session)
+  }, 2500)
+  readyFallback.unref()
+  ws.once('close', () => clearTimeout(readyFallback))
+  void handle.done.then(
+    () => clearTimeout(readyFallback),
+    () => clearTimeout(readyFallback),
+  )
 
   ws.on('message', (raw) => {
     if (session.closed) return
@@ -378,16 +402,21 @@ export function setupScript(shell: string): string {
     quiet('export COLORTERM=truecolor'),
     quiet("export PS1=''"),
     quiet("export PS2=''"),
-    quiet('printf \'\\e]777;warp-node-version;%s\\a\' "$(command -v node >/dev/null 2>&1 && node --version 2>/dev/null)"'),
+    quiet('printf \'\\033]777;warp-node-version;%s\\007\' "$(command -v node >/dev/null 2>&1 && node --version 2>/dev/null)"'),
   )
   if (name === 'zsh') {
     lines.push(
-      quiet('dsh_block_mark() { printf \'\\e]777;warp-block-end;%s;%s\\a\' "$?" "$PWD" }'),
-      quiet('precmd_functions+=dsh_block_mark'),
+      quiet('dsh_block_mark() { printf \'\\033]777;warp-block-end;%s;%s\\007\' "$?" "$PWD" }'),
+      // `precmd_functions+=fn` on an unset parameter creates a scalar, not
+      // an array, and zsh's hook runner then silently skips every entry —
+      // the marker never fires and the session hangs before `ready`.
+      // add-zsh-hook always builds a real array; declare one explicitly as
+      // a fallback where the autoload is unavailable.
+      quiet('if autoload -Uz add-zsh-hook 2>/dev/null; then add-zsh-hook precmd dsh_block_mark; else typeset -ga precmd_functions && precmd_functions+=(dsh_block_mark); fi'),
     )
   } else {
     lines.push(
-      quiet('PROMPT_COMMAND=\'printf "\\e]777;warp-block-end;%s;%s\\a" "$?" "$PWD"\'"${PROMPT_COMMAND:+;$PROMPT_COMMAND}"'),
+      quiet('PROMPT_COMMAND=\'printf "\\033]777;warp-block-end;%s;%s\\007" "$?" "$PWD"\'"${PROMPT_COMMAND:+;$PROMPT_COMMAND}"'),
     )
   }
   return lines.join('\n') + '\n'

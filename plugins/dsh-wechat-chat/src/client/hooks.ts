@@ -58,7 +58,7 @@ export function useRecentSnapshots(
     const unsubs = target
       .map((id) => resolve(id)?.session.subscribe(pull))
       .filter((fn): fn is () => void => typeof fn === 'function')
-    const timer = window.setInterval(pull, 800)
+    const timer = window.setInterval(pull, 1600)
     return () => {
       for (const fn of unsubs) fn()
       window.clearInterval(timer)

@@ -197,6 +197,18 @@ export function projectChat(snapshot: ConversationSnapshot | undefined, t: Trans
     else items.push({ kind: 'question', id: wait.key, wait })
   }
 
+  if (snapshot.promptError) {
+    const head = snapshot.promptError.op === 'stop' ? t('stopFailed') : t('sendFailed')
+    const detail = snapshot.promptError.error.message?.trim()
+    items.push({
+      kind: 'tip',
+      id: `prompt-${snapshot.promptError.op}`,
+      text: detail ? `${head}：${detail}` : head,
+    })
+  } else if (snapshot.lastAgentError) {
+    items.push({ kind: 'tip', id: 'agent-error', text: snapshot.lastAgentError })
+  }
+
   const last = items[items.length - 1]
   const streaming = last?.kind === 'them' && last.streaming
   if (snapshot.running && !streaming && snapshot.pending.length === 0) {

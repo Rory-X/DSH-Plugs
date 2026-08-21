@@ -42,8 +42,8 @@ export function MomentsFeed({
             <div className={styles.postText}>{post.text}</div>
             {post.chips.length > 0 && (
               <div className={styles.postChips}>
-                {post.chips.map((chip) => (
-                  <span key={chip} className={styles.chip}>{chip}</span>
+                {post.chips.map((chip, index) => (
+                  <span key={`${post.id}:${index}`} className={styles.chip}>{chip}</span>
                 ))}
               </div>
             )}
