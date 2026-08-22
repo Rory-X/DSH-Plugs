@@ -202,6 +202,9 @@ export function SidePanelsShell(props: ShellProps) {
   // grows a toggle (LauncherToggle) to bring it back. The card hides with
   // `visibility`, not `display`, so its rect stays measurable and scrolling
   // the conversation out from under it auto-shows it again.
+  //
+  // Trajectory is a full-column view with no chat rows. The message probe
+  // would leave the card up over the ledger; hide it for the whole view.
   const launcherRef = useRef<HTMLDivElement | null>(null)
   useEffect(() => {
     if (open || tabs.length === 0) {
@@ -211,8 +214,18 @@ export function SidePanelsShell(props: ShellProps) {
     let raf: number | null = null
     const measure = (): void => {
       const card = launcherRef.current
+      if (card === null) {
+        launcher.setOccluded(false)
+        return
+      }
+      // ui-trajectory's documented scrollport hook — present only while that
+      // view is the active conversation.view entry.
+      if (document.querySelector('[data-trajectory-scroll]') !== null) {
+        launcher.setOccluded(true)
+        return
+      }
       const sp = document.querySelector('[data-conversation-scroll]')
-      if (card === null || sp === null) {
+      if (sp === null) {
         launcher.setOccluded(false)
         return
       }
