@@ -44,6 +44,8 @@ const MARKER_PREFIXES = [BLOCK_END_PREFIX, NODE_VERSION_PREFIX, CAPS_PREFIX] as 
 const CONTEXT_TIMEOUT_MS = 2500
 /** How long a detached PTY outlives its socket, waiting for a reconnect. */
 const DETACH_GRACE_MS = 10 * 60 * 1000
+/** If the prompt hook never fires, still unblock the client editor. */
+const READY_FALLBACK_MS = 1500
 /** Total output (chars) buffered for replay while a session is detached. */
 const REPLAY_MAX_CHARS = 1024 * 1024
 /** Host pings every attached socket on this cadence; two misses kill it. */
@@ -71,6 +73,8 @@ export interface TerminalSession {
   replay: ServerMessage[]
   replayChars: number
   detachTimer: ReturnType<typeof setTimeout> | undefined
+  /** Unblocks the client if the first warp-block-end marker never arrives. */
+  readyTimer: ReturnType<typeof setTimeout> | undefined
   nodeVersion: string | undefined
   contextSeq: number
   mode: 'prompt' | 'output'
@@ -329,6 +333,7 @@ export async function openSession(
     replay: [],
     replayChars: 0,
     detachTimer: undefined,
+    readyTimer: undefined,
     nodeVersion: undefined,
     contextSeq: 0,
     mode: 'prompt',
@@ -390,6 +395,7 @@ export async function openSession(
   // the shell itself draws no  the client renders the Warp-style one.
   const setup = setupScript(shell)
   await handle.write(setup)
+  scheduleReadyFallback(session)
 
   if (session.closed) return undefined
   return session
@@ -479,6 +485,7 @@ export function closeSession(session: TerminalSession): void {
     clearTimeout(session.detachTimer)
     session.detachTimer = undefined
   }
+  clearReadyTimer(session)
   void session.handle.terminate().catch(() => {})
   const ws = session.ws
   session.ws = null
@@ -550,7 +557,9 @@ export function setupScript(shell: string): string {
     lines.push(
       quiet('printf \'\\e]777;warp-caps;bracketed-paste=%s\\a\' "$(zle -l bracketed-paste >/dev/null 2>&1 && echo 1 || echo 0)"'),
       quiet('dsh_block_mark() { printf \'\\e]777;warp-block-end;%s;%s\\a\' "$?" "$PWD" }'),
-      quiet('precmd_functions+=dsh_block_mark'),
+      // `+=name` on an unset hook array becomes a scalar; zsh then skips it.
+      quiet('typeset -ga precmd_functions'),
+      quiet('precmd_functions+=(dsh_block_mark)'),
     )
   } else {
     lines.push(
@@ -559,6 +568,10 @@ export function setupScript(shell: string): string {
       quiet('PROMPT_COMMAND=\'printf "\\e]777;warp-block-end;%s;%s\\a" "$?" "$PWD"\'"${PROMPT_COMMAND:+;$PROMPT_COMMAND}"'),
     )
   }
+  // precmd / PROMPT_COMMAND only run before the *next* prompt. Login zsh
+  // often never reaches that cycle after a multi-line paste, so emit the
+  // first marker here or the client textarea stays disabled forever.
+  lines.push(quiet('printf \'\\e]777;warp-block-end;%s;%s\\a\' "$?" "$PWD"'))
   return lines.join('\n') + '\n'
 }
 
@@ -625,18 +638,8 @@ export function onTerminalData(session: TerminalSession, chunk: string): void {
     if (Number.isNaN(exitCode)) continue
 
     if (session.ready === false) {
-      session.ready = true
       if (cwd.length > 0) session.cwd = cwd
-      deliver(session, {
-        type: 'ready',
-        cwd: session.cwd,
-        shell: session.shell,
-        rows: session.rows,
-        cols: session.cols,
-        bracketedPaste: session.bracketedPaste,
-      })
-      sendHistoryIfReady(session)
-      void updateContext(session)
+      markReady(session)
     } else {
       if (cwd.length > 0) session.cwd = cwd
       deliver(session, { type: 'block-end', exitCode })
@@ -730,6 +733,37 @@ async function getGitInfo(
   } catch {
     return {}
   }
+}
+
+function clearReadyTimer(session: TerminalSession): void {
+  if (session.readyTimer === undefined) return
+  clearTimeout(session.readyTimer)
+  session.readyTimer = undefined
+}
+
+/** First-time handshake. Later block-end markers only close command blocks. */
+function markReady(session: TerminalSession): void {
+  if (session.closed || session.ready) return
+  session.ready = true
+  clearReadyTimer(session)
+  deliver(session, {
+    type: 'ready',
+    cwd: session.cwd,
+    shell: session.shell,
+    rows: session.rows,
+    cols: session.cols,
+    bracketedPaste: session.bracketedPaste,
+  })
+  sendHistoryIfReady(session)
+  void updateContext(session)
+}
+
+function scheduleReadyFallback(session: TerminalSession): void {
+  if (session.ready || session.closed || session.readyTimer !== undefined) return
+  session.readyTimer = setTimeout(() => {
+    session.readyTimer = undefined
+    markReady(session)
+  }, READY_FALLBACK_MS)
 }
 
 function sendHistoryIfReady(session: TerminalSession): void {

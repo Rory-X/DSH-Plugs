@@ -5,6 +5,8 @@ import Schema from '@deepseek-ai/schemastery'
 import { installSettingsSection } from '@deepseek-ai/dsh-settings'
 import {
   DEFAULT_CONFIG,
+  FULL_SESSION_LOAD_LIMIT_MAX,
+  FULL_SESSION_LOAD_LIMIT_MIN,
   PANEL_LAUNCHER_WIDTH_MAX,
   PANEL_LAUNCHER_WIDTH_MIN,
   SETTINGS_NAMESPACE,
@@ -12,19 +14,28 @@ import {
 } from './shared/config'
 import { createDshCodexGitGraphServer } from './host/git-graph/server'
 import { createDshCodexSettingsServer } from './host/settings/server'
+import { createDshCodexSideChatServer } from './host/side-chat/server'
 import { createDshCodexTerminalServer } from './host/terminal/server'
 
 export const name = 'dsh-codex'
-export const inject = ['subprocess', 'webServer', 'settings', 'llm', 'agentDefaultModel'] as const
+export const inject = ['subprocess', 'webServer', 'settings', 'llm', 'agentDefaultModel', 'agents', 'sessions', 'agentPresets', 'commands'] as const
 
 /** Host-side schema for the one durable Codex configuration namespace. */
 export const ConfigSchema = Schema.object({
   navigatorEnabled: Schema.boolean().default(DEFAULT_CONFIG.navigatorEnabled),
   conversationCollapseEnabled: Schema.boolean().default(DEFAULT_CONFIG.conversationCollapseEnabled),
+  stickyUserBubbleEnabled: Schema.boolean().default(DEFAULT_CONFIG.stickyUserBubbleEnabled),
+  stickyUserBubbleMode: Schema.union([
+    Schema.const('running'),
+    Schema.const('always'),
+  ]).default(DEFAULT_CONFIG.stickyUserBubbleMode),
+  fullSessionLoadEnabled: Schema.boolean().default(DEFAULT_CONFIG.fullSessionLoadEnabled),
+  fullSessionLoadLimit: Schema.number().min(FULL_SESSION_LOAD_LIMIT_MIN).max(FULL_SESSION_LOAD_LIMIT_MAX).default(DEFAULT_CONFIG.fullSessionLoadLimit),
   terminalEnabled: Schema.boolean().default(DEFAULT_CONFIG.terminalEnabled),
   gitGraphEnabled: Schema.boolean().default(DEFAULT_CONFIG.gitGraphEnabled),
   filesEnabled: Schema.boolean().default(DEFAULT_CONFIG.filesEnabled),
   fileLinksInPanel: Schema.boolean().default(DEFAULT_CONFIG.fileLinksInPanel),
+  sideChatEnabled: Schema.boolean().default(DEFAULT_CONFIG.sideChatEnabled),
   terminalShell: Schema.union([
     Schema.const('auto'),
     Schema.const('bash'),
@@ -73,4 +84,9 @@ export function apply(ctx: Context, config?: Partial<DshCodexConfig>): void {
     const server = createDshCodexGitGraphServer(ctx)
     return () => server.dispose()
   }, 'dsh-codex: git-graph routes')
+
+  ctx.effect(() => {
+    const server = createDshCodexSideChatServer(ctx)
+    return () => server.dispose()
+  }, 'dsh-codex: side-chat routes')
 }

@@ -518,6 +518,86 @@
   line-height: 18px;
 }
 
+/* Typeable capacity field with a trailing DSH Menu chevron. The chrome
+   matches .input so the pair reads as one control. */
+.capacityCombo {
+  box-sizing: border-box;
+  display: flex;
+  align-items: stretch;
+  width: 100%;
+  height: 32px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-1);
+}
+
+.capacityCombo:focus-within {
+  border-color: var(--dsw-alias-brand-primary);
+}
+
+.capacityInput {
+  box-sizing: border-box;
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 100%;
+  height: 100%;
+  padding: 0 10px;
+  border: none;
+  background: transparent;
+  font: inherit;
+  font-size: 14px;
+  line-height: 22px;
+  color: var(--dsw-alias-label-primary);
+}
+
+.capacityInput:focus {
+  outline: none;
+}
+
+.capacityInput::placeholder {
+  color: var(--dsw-alias-label-dimmed);
+}
+
+.capacityInput:disabled,
+.capacityToggle:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.capacityMenu {
+  display: flex;
+  flex: 0 0 28px;
+  align-items: stretch;
+}
+
+.capacityToggle {
+  box-sizing: border-box;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  padding: 0;
+  border: none;
+  border-left: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 0 8px 8px 0;
+  background: transparent;
+  color: var(--dsw-alias-label-caption);
+  cursor: pointer;
+}
+
+.capacityToggle:hover:not(:disabled) {
+  background: var(--dsw-alias-interactive-bg-hover);
+}
+
+.capacityChevron {
+  display: inline-flex;
+  transition: transform 120ms ease;
+}
+
+.capacityChevron[data-open='true'] {
+  transform: rotate(180deg);
+}
+
 .modelEmpty {
   padding: 12px;
   border: 1px dashed var(--dsw-alias-border-l3);
@@ -628,7 +708,8 @@ select.input {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .customizedSummary::before {
+  .customizedSummary::before,
+  .capacityChevron {
     transition: none;
   }
 }

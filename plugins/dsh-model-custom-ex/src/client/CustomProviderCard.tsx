@@ -14,11 +14,8 @@
  * and at least one model — are required here rather than at load, so the
  * failure names the field while the user is still looking at it.
  *
- * There is deliberately no reasoning-effort control, here or on the editor
- * card: effort is a per-MODEL capability, and the models under one provider
- * disagree about it, so a provider-scoped control can only be set to a value
- * some of them reject. The composer's model picker offers each model its own
- * levels instead.
+ * Per-model thinking levels and their switch-to default live on the catalog
+ * rows, not on this card.
  */
 
 import { useState } from 'react'
@@ -27,6 +24,7 @@ import type { IApiClient } from '@deepseek-ai/dsh-api-remotes/client'
 import { apiKeyFailure } from './apiKey.ts'
 import { EditorFooter } from './EditorFooter.tsx'
 import { validateDeepSeekModels } from './DeepSeekModelsEditor.tsx'
+import { writeProviderDefaults } from './defaults.ts'
 import { ModelListEditor } from './ModelListEditor.tsx'
 import type { ModelDraft } from './ModelListEditor.tsx'
 import { deriveKeyRef, messageOf } from './store.ts'
@@ -58,6 +56,8 @@ export interface CustomProviderCardProps {
    * than a silent overwrite of its whole profile.
    */
   revision: number
+  /** Revision of the per-model defaults namespace, when the host registered it. */
+  defaultsRevision?: number
   /** Wire faces for the write and for interrogating the endpoint. */
   api: Pick<IApiClient, 'settings' | 'credentials' | 'llm'>
   /** Section copy. */
@@ -83,6 +83,7 @@ export function CustomProviderCard(props: CustomProviderCardProps): ReactNode {
   const [baseURL, setBaseURL] = useState('')
   const [protocol, setProtocol] = useState(protocols[0] ?? '')
   const [keyDraft, setKeyDraft] = useState('')
+  const [defaults, setDefaults] = useState<Record<string, string>>({})
   const [models, setModels] = useState<readonly ModelDraft[]>([])
   const [busy, setBusy] = useState(false)
   const [failure, setFailure] = useState<string | undefined>(undefined)
@@ -164,6 +165,10 @@ export function CustomProviderCard(props: CustomProviderCardProps): ReactNode {
       // The profile landed; saying the key did not is the only honest report,
       // and the retry above now goes straight back to this write.
       if (!stored.result.ok) return stored.result.error.message
+    }
+    if (props.defaultsRevision !== undefined && Object.keys(defaults).length > 0) {
+      const written = await writeProviderDefaults(api, route, defaults, props.defaultsRevision)
+      if (!written.ok) return written.message
     }
     return undefined
   }
@@ -267,6 +272,9 @@ export function CustomProviderCard(props: CustomProviderCardProps): ReactNode {
       <ModelListEditor
         models={models}
         onChange={setModels}
+        {...props.defaultsRevision === undefined
+          ? {}
+          : { defaults, onDefaultsChange: setDefaults }}
         probe={{
           settingsNs: NS,
           baseURL,

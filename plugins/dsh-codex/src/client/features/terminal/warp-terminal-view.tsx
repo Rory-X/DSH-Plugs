@@ -1026,6 +1026,21 @@ export function WarpTerminalView(props: WarpTerminalViewProps) {
       if (wsRef.current === ws) wsRef.current = null
     }
   }, [sessionId, reconnectToken])
+
+  // Login-shell prompt hooks sometimes never emit the first block-end, so the
+  // host never sends `ready` and the textarea stays disabled. If the socket is
+  // actually open, unlock typing after a short wait.
+  useEffect(() => {
+    if (connState !== 'connecting') return
+    const id = window.setTimeout(() => {
+      const ws = wsRef.current
+      if (ws !== null && ws.readyState === WebSocket.OPEN) {
+        setConnState((state) => state === 'connecting' ? 'ready' : state)
+      }
+    }, 1800)
+    return () => window.clearTimeout(id)
+  }, [connState])
+
   const runDraft = useCallback(() => {
     const command = draft
     if (command.trim().length === 0) return
@@ -1198,6 +1213,7 @@ export function WarpTerminalView(props: WarpTerminalViewProps) {
   const onMouseDown = useCallback((event: ReactMouseEvent) => {
     if (altActiveRef.current) return
     if (event.button !== 0) return
+    if (runningIdRef.current === null) textareaRef.current?.focus()
     const cell = pointToCell(event.clientX, event.clientY)
     dragRef.current = { startRow: cell.row, startCol: cell.col }
     selectionRef.current = null
@@ -1317,10 +1333,17 @@ export function WarpTerminalView(props: WarpTerminalViewProps) {
       scrollRef.current?.focus()
       return
     }
-    if (!editorWasHiddenRef.current) return
+    if (!editorWasHiddenRef.current && connState !== 'ready') return
     editorWasHiddenRef.current = false
-    textareaRef.current?.focus()
-  }, [editorHidden])
+    const textarea = textareaRef.current
+    if (textarea === null || textarea.offsetParent === null) return
+    const active = document.activeElement
+    if (active instanceof HTMLElement) {
+      const tag = active.tagName
+      if (active !== textarea && (tag === 'TEXTAREA' || tag === 'INPUT' || active.isContentEditable)) return
+    }
+    textarea.focus()
+  }, [editorHidden, connState])
 
   useEffect(() => {
     const el = scrollRef.current
@@ -1346,7 +1369,23 @@ export function WarpTerminalView(props: WarpTerminalViewProps) {
     return block.getBoundingClientRect().bottom + 200 > scroll.getBoundingClientRect().bottom
   })()
   return (
-    <div className="dsh-warp-terminal">
+    <div
+      className="dsh-warp-terminal"
+      onMouseDown={(event) => {
+        if (editorHidden || connState !== 'ready') return
+        const target = event.target
+        if (!(target instanceof HTMLElement)) return
+        if (target.closest('button, textarea, input, [contenteditable]')) return
+        const textarea = textareaRef.current
+        if (textarea === null || textarea.offsetParent === null) return
+        textarea.focus()
+      }}
+    >
+      {connState === 'connecting' && (
+        <div className="dsh-warp-terminal-banner is-reconnecting">
+          <span className="dsh-warp-terminal-reconnecting">{t('status.connecting')}</span>
+        </div>
+      )}
       {connState === 'reconnecting' && (
         <div className="dsh-warp-terminal-banner is-reconnecting">
           <span className="dsh-warp-terminal-reconnecting">{error ?? t('status.reconnecting')}</span>

@@ -16,6 +16,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings-plugins/client'
 
 import { UpdateCard, type DesktopUpdateConfig } from './card'
+import { RestartPrompt } from './RestartPrompt'
 import { installDesktopSeats } from './seats'
 
 /** Client services this plugin requires before `apply` runs. */
@@ -91,6 +92,11 @@ export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, 'zh', zh), 'desktop-update: zh dictionary')
   ctx.effect(() => ctx.locale.register(NS, 'en', en), 'desktop-update: en dictionary')
   ctx.effect(() => installDesktopSeats(), 'desktop-update: native seats')
+  ctx.slots.inject('shell.overlay', () => ctx.slots.register({
+    name: 'shell.overlay',
+    id: 'desktop-update-restart-prompt',
+    order: 1000,
+  }, RestartPrompt as never))
 
   // Bound on this fiber: disposal, invalidation subscriptions, and the
   // initial Host read are owned by the binder's ctx.effect.

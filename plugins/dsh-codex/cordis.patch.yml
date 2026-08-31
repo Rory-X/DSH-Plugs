@@ -13,6 +13,7 @@
         navigatorEnabled: true
         terminalEnabled: true
         gitGraphEnabled: true
+        sideChatEnabled: true
         terminalShell: auto
         terminalScrollback: 5000
         terminalFontSize: 12

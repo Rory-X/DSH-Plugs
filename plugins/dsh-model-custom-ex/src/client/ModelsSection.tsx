@@ -19,6 +19,7 @@ import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
 import { Button, IconPlusOutline16, Modal } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { InjectFace } from '@deepseek-ai/dsh-client-ui-slots'
 import { CustomProviderCard } from './CustomProviderCard.tsx'
+import { DEFAULTS_NAMESPACE } from '../shared.ts'
 import { deriveKeyRef, messageOf, protocolChoices, providerUsable } from './store.ts'
 import type { ModelsSettingsState, ModelsSettingsStore, ProviderRow } from './store.ts'
 import { ProviderEditor, type ProviderEditorProps } from './ProviderEditor.tsx'
@@ -67,7 +68,7 @@ interface EditorTarget extends ProviderIdentity {
 /** Values that vary around the shared provider-editor rendering. */
 interface ProviderEditorRenderProps extends Pick<
   ProviderEditorProps,
-  'namespace' | 'api' | 't' | 'readOnly' | 'onClose'
+  'namespace' | 'defaultsNamespace' | 'api' | 't' | 'readOnly' | 'onClose'
 > {
   target: EditorTarget
 }
@@ -99,7 +100,7 @@ function renderProviderEditor({ target, ...props }: ProviderEditorRenderProps): 
 export async function removeProviderProfile(
   api: Pick<IApiClient, 'settings' | 'credentials'>,
   controller: ModelsSettingsStore,
-  target: { settingsNs: string; settingsPath: readonly string[]; credentialRef?: string },
+  target: { provider: string; settingsNs: string; settingsPath: readonly string[]; credentialRef?: string },
 ): Promise<string | undefined> {
   try {
     if (target.credentialRef !== undefined) {
@@ -111,6 +112,12 @@ export async function removeProviderProfile(
       ops: [{ op: 'unset', path: [...target.settingsPath] }],
     })
     if (!response.result.ok) return response.result.error.message
+    // Best-effort: the defaults namespace is owned by this plugin's host half
+    // and may be absent until DSH is restarted. A leftover map is inert.
+    await api.settings.mutate({
+      ns: DEFAULTS_NAMESPACE,
+      ops: [{ op: 'unset', path: ['defaults', target.provider] }],
+    }).catch(() => undefined)
   } catch (error) {
     // The transport rejected rather than answering; the caller must be able
     // to retry the idempotent operation instead of the row silently staying.
@@ -274,6 +281,7 @@ function Loaded({ injected }: { injected: InjectFace<ModelsSectionInjected> }): 
   // one whose schema names the protocols one may speak; without it mounted
   // there is nothing to declare and the entry point stays disabled.
   const protocols = protocolChoices(state.namespaces.get('llm-pi-ai'))
+  const defaultsNamespace = state.namespaces.get(DEFAULTS_NAMESPACE)
 
   return (
     <div className={styles['section']}>
@@ -301,6 +309,7 @@ function Loaded({ injected }: { injected: InjectFace<ModelsSectionInjected> }): 
                 {renderProviderEditor({
                   target,
                   namespace,
+                  ...defaultsNamespace === undefined ? {} : { defaultsNamespace },
                   api,
                   t,
                   readOnly: !state.writable,
@@ -385,6 +394,7 @@ function Loaded({ injected }: { injected: InjectFace<ModelsSectionInjected> }): 
                 ? renderProviderEditor({
                   target,
                   namespace,
+                  ...defaultsNamespace === undefined ? {} : { defaultsNamespace },
                   api,
                   t,
                   readOnly: !state.writable,
@@ -423,6 +433,7 @@ function Loaded({ injected }: { injected: InjectFace<ModelsSectionInjected> }): 
                 displayName={addTarget.displayName}
                 hideTitle
                 namespace={addNamespace}
+                {...defaultsNamespace === undefined ? {} : { defaultsNamespace }}
                 settingsPath={addTarget.settingsPath}
                 api={api}
                 t={t}
@@ -439,6 +450,9 @@ function Loaded({ injected }: { injected: InjectFace<ModelsSectionInjected> }): 
                   protocols={protocols}
                   /* v8 ignore next -- the card only opens from a button disabled without this namespace */
                   revision={state.namespaces.get('llm-pi-ai')?.revision ?? 0}
+                  {...defaultsNamespace === undefined
+                    ? {}
+                    : { defaultsRevision: defaultsNamespace.revision }}
                   api={api}
                   t={t}
                   readOnly={!state.writable}

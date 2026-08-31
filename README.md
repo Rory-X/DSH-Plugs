@@ -14,6 +14,10 @@ The consolidated Codex shell: Codex-style message navigation, Cursor-style per-t
 
 Cursor-style debug mode: `/debug`, a red Debug chip, a Debug Logs dock above the composer, and a reproduction-steps card with **Proceed** / **Mark as fixed**. Mode/wait/logs stay in process memory for the live session only (not written to the durable session log).
 
+### [@just-genius/dsh-multi-repo](plugins/dsh-multi-repo)
+
+Workspace folder picking for multi-folder products: add folders one by one (no git scan), pick one primary as work focus, and inject the folder list into the system prompt.
+
 ### [@just-genius/dsh-memory](plugins/dsh-memory)
 
 Global markdown memory: **Settings → Memory** for manual CRUD, `memory_propose` for AI writes that wait for user confirmation, and enabled entries injected into the system prompt. Stored under `~/.dsh/memory/` as `index.json` + `entries/*.md`.
@@ -41,6 +45,14 @@ Turns the web surface into a WeChat-style messenger: chat list, green/white bubb
 ### [@just-genius/dsh-whale-girl](plugins/dsh-whale-girl)
 
 Desktop pet (whale-girl). In a plain browser it is the in-page companion; in DSH-Desktop it opens a transparent always-on-top overlay via `window.dshDesktop.overlays` so the pet sits on the OS desktop.
+
+### [@just-genius/dsh-notify-jump](plugins/dsh-notify-jump)
+
+Click a `dsh-notification` system banner to focus the window and open that session. Also notifies when a session waits on approval, ask, or plan review.
+
+### [@just-genius/dsh-session-archive](plugins/dsh-session-archive)
+
+**Settings → 会话归档**: archived sessions grouped by workspace, with confirmed delete. Sidebar **归档会话** stays one-click.
 
 ## Repository layout
 

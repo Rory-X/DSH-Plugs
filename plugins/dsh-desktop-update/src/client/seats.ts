@@ -101,12 +101,13 @@ function syncNotify(state: DesktopUpdateState | null): void {
   if (state?.app) lines.push(t.downloadTo(state.app.latest))
   if (state?.dsh) lines.push(t.updateDshTo(state.dsh.latest))
   const key = lines.join('\n')
-  if (key === lastNotifyKey) return
-  lastNotifyKey = key
   if (key === '') {
+    lastNotifyKey = ''
     void notify.close(CONTRIBUTOR, NOTIFY_ID)
     return
   }
+  if (key === lastNotifyKey) return
+  lastNotifyKey = key
   void notify.show({
     contributor: CONTRIBUTOR,
     id: NOTIFY_ID,
@@ -135,7 +136,13 @@ export function installDesktopSeats(): () => void {
   })
   const unsubNotify = b.notify?.onAction((action) => {
     if (!alive || action.contributor !== CONTRIBUTOR) return
-    if (action.id === NOTIFY_ID) void b.updates.checkNow()
+    if (action.id === NOTIFY_ID) {
+      // Clicking a notification is an explicit request for another check. The
+      // update state may be unchanged, so clear the content dedupe key first;
+      // otherwise the next identical state is suppressed forever.
+      lastNotifyKey = ''
+      void b.updates.checkNow()
+    }
   }) ?? (() => {})
   const apply = (state: DesktopUpdateState | null) => {
     void push(state)

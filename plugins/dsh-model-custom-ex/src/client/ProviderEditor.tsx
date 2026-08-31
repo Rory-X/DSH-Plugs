@@ -11,14 +11,11 @@
  * display name and wire protocol of a pi-ai route the adapter does not ship —
  * the two fields the create card asked that route for, editable here for the
  * same reason).
- * Reasoning effort is deliberately absent: it is a per-MODEL capability, and
- * the models under one provider disagree about it, so a provider-scoped
- * control can only be set to a value some of them reject. The composer's
- * model picker offers each model its own levels; `settings.yaml` keeps the
- * profile field for a deployment that knows its route. Everything else stays
- * owned by `settings.yaml`. Profile edits land as minimal `settings.mutate`
- * path ops against the stored section — the card names only the fields it can
- * see instead of rebuilding the whole subtree from a partial descriptor.
+ * Reasoning effort stays on each model row: offered levels and the default
+ * used when switching to that model. Everything else stays owned by
+ * `settings.yaml`. Profile edits land as minimal `settings.mutate` path ops
+ * against the stored section — the card names only the fields it can see
+ * instead of rebuilding the whole subtree from a partial descriptor.
  */
 
 import { useEffect, useMemo, useState } from 'react'
@@ -32,6 +29,7 @@ import {
 } from './DeepSeekModelsEditor.tsx'
 import { apiKeyFailure } from './apiKey.ts'
 import { EditorFooter } from './EditorFooter.tsx'
+import { defaultsFromNamespace, writeProviderDefaults } from './defaults.ts'
 import { ModelListEditor } from './ModelListEditor.tsx'
 import { deriveKeyRef, messageOf, protocolChoices } from './store.ts'
 import type { en } from './locales.ts'
@@ -61,6 +59,8 @@ export interface ProviderEditorProps {
   declared?: boolean
   /** The owning namespace view (schema, layers, secrets). */
   namespace: SettingsNamespaceView
+  /** Per-model switch-to defaults namespace, when the host half registered it. */
+  defaultsNamespace?: SettingsNamespaceView
   /** Path from the section root to this provider's profile. */
   settingsPath: readonly string[]
   /** Wire faces for writes and for interrogating a provider endpoint. */
@@ -145,6 +145,10 @@ function refFor(namespace: SettingsNamespaceView, path: readonly string[], provi
 export function ProviderEditor(props: ProviderEditorProps): ReactNode {
   const { namespace, settingsPath, api, t } = props
   const [draft, setDraft] = useState<Record<string, unknown>>(() => draftAt(namespace, settingsPath))
+  const [defaults, setDefaults] = useState<Record<string, string>>(
+    () => defaultsFromNamespace(props.defaultsNamespace, props.provider),
+  )
+  const [defaultsRevision, setDefaultsRevision] = useState(() => props.defaultsNamespace?.revision ?? 0)
   const [keyDraft, setKeyDraft] = useState('')
   const [keyState, setKeyState] = useState<CredentialView | undefined>(undefined)
   const [busy, setBusy] = useState(false)
@@ -281,6 +285,14 @@ export function ProviderEditor(props: ProviderEditorProps): ReactNode {
     if (keyValue.length > 0) {
       const stored = await api.credentials.set({ ref: keyRef, value: keyValue })
       if (!stored.result.ok) return stored.result.error.message
+    }
+    if (props.credentialOnly !== true && props.defaultsNamespace !== undefined) {
+      const previous = defaultsFromNamespace(props.defaultsNamespace, props.provider)
+      if (JSON.stringify(previous) !== JSON.stringify(defaults)) {
+        const written = await writeProviderDefaults(api, props.provider, defaults, defaultsRevision)
+        if (!written.ok) return written.message
+        setDefaultsRevision(written.revision)
+      }
     }
     setKeyDraft('')
     return undefined
@@ -460,7 +472,17 @@ export function ProviderEditor(props: ProviderEditorProps): ReactNode {
                   defaultMaxTokens={typeof defaultMaxTokens === 'number' ? defaultMaxTokens : undefined}
                 />
               )
-              : <ModelListEditor {...catalogProps} probe={probe} probeBlocked={keyFailure} api={api} />}
+              : (
+                <ModelListEditor
+                  {...catalogProps}
+                  {...props.defaultsNamespace === undefined
+                    ? {}
+                    : { defaults, onDefaultsChange: setDefaults }}
+                  probe={probe}
+                  probeBlocked={keyFailure}
+                  api={api}
+                />
+              )}
           </div>
         </details>}
       </>

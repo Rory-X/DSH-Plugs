@@ -27,6 +27,20 @@ export interface DesktopUpdateState {
 
 export type DesktopUpdateKind = 'app' | 'dsh'
 
+export type DesktopRestartWebReason = 'plugin' | 'dsh-runtime'
+
+export type DesktopRestartChoice = 'later' | 'restart'
+
+export interface DesktopRestartPrompt {
+  id: string
+  reason: DesktopRestartWebReason
+  title: string
+  message: string
+  detail: string
+  later: string
+  restart: string
+}
+
 export type DesktopSeatName = 'applicationMenu' | 'tray'
 
 export interface DesktopMenuItemSpec {
@@ -88,6 +102,10 @@ export interface DshDesktop {
     setDshChannel(channel: DshChannel, version?: string): Promise<DesktopUpdateState>
     skipVersion(kind: DesktopUpdateKind): Promise<void>
     setGate(kind: DesktopUpdateKind, enabled: boolean): Promise<DesktopUpdateState>
+    restartWeb(): Promise<void>
+    onPrompt(listener: (prompt: DesktopRestartPrompt) => void): () => void
+    ackPrompt(id: string): void
+    respondPrompt(id: string, choice: DesktopRestartChoice): void
     relaunch(): void
   }
   seats: {

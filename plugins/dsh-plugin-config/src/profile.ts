@@ -114,8 +114,9 @@ function ensureHeader(text: string): string {
 
 function setDisabled(raw: string, disabled: boolean): string {
   const value = disabled ? 'true' : 'false'
+  // 保留行尾空白（含换行），避免相邻块被粘成一行
   if (/^\s+disabled:\s*/m.test(raw)) {
-    return raw.replace(/^\s+disabled:\s*(true|false)\s*$/m, `  disabled: ${value}`)
+    return raw.replace(/^(\s+disabled:\s*)(true|false)(\s*)$/m, `$1${value}$3`)
   }
   return raw.replace(/\s*$/, '\n') + `  disabled: ${value}\n`
 }

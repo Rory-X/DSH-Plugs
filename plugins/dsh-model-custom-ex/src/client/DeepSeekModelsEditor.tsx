@@ -10,6 +10,9 @@ import type { ReactNode } from 'react'
 import {
   IconChevronDownOutline14, IconChevronRightOutline14, IconPlusOutline16, IconTrashOutline16,
 } from '@deepseek-ai/dsh-client-ui-primitives'
+import {
+  CONTEXT_WINDOW_PRESETS, CapacityCombo, DEFAULT_MAX_TOKENS, MAX_TOKEN_PRESETS,
+} from './CapacityCombo.tsx'
 import type { en } from './locales.ts'
 import styles from './ModelsSection.module.css'
 
@@ -151,8 +154,8 @@ export interface DeepSeekModelsEditorProps {
 export function DeepSeekModelsEditor(props: DeepSeekModelsEditorProps): ReactNode {
   // Capacities are edited as text, so a field's keystrokes are held here
   // rather than re-derived from the parsed count on every change, which would
-  // rewrite `1000` to `1K` mid-word. Unreadable text is kept past blur so the
-  // save-time rejection names a row the user can still see — which is why
+  // rewrite `1000` to `1K` mid-word. Unreadable text stays until corrected so
+  // the save-time rejection names a row the user can still see — which is why
   // this is one entry PER FIELD: a single active buffer would be displaced by
   // editing any other field, and the abandoned one would fall back to
   // rendering its stored NaN as the literal `NaN`.
@@ -218,21 +221,6 @@ export function DeepSeekModelsEditor(props: DeepSeekModelsEditorProps): ReactNod
     return typeof value === 'number' ? formatCapacity(value) : ''
   }
 
-  const settleCapacity = (index: number, field: CapacityField): void => {
-    const key = `${String(index)}:${field}`
-    const typed = editing.get(key)
-    if (typed === undefined) return
-    // Unreadable text stays on screen: the save-time rejection names a row the
-    // user can still see and correct.
-    const parsed = parseCapacity(typed)
-    if (parsed !== undefined && Number.isNaN(parsed)) return
-    setEditing((current) => {
-      const next = new Map(current)
-      next.delete(key)
-      return next
-    })
-  }
-
   /** One capacity field of one row, rendered inside the row's disclosure. */
   const capacityField = (
     model: DeepSeekModelDraft,
@@ -240,26 +228,20 @@ export function DeepSeekModelsEditor(props: DeepSeekModelsEditorProps): ReactNod
     field: CapacityField,
     fallback: number | undefined,
   ): ReactNode => (
-    <label className={styles['modelField']}>
-      <span className={styles['modelFieldLabel']}>{props.t(field === 'contextWindow' ? 'contextWindow' : 'maxTokens')}</span>
-      <input
-        className={styles['input']}
-        type="text"
-        inputMode="numeric"
-        value={capacityText(model, index, field)}
-        placeholder={fallback === undefined
-          ? props.t(field === 'contextWindow' ? 'contextWindowPlaceholder' : 'maxTokensPlaceholder')
-          : formatCapacity(fallback)}
-        aria-label={`${props.t(field === 'contextWindow' ? 'contextWindow' : 'maxTokens')} ${String(index + 1)}`}
-        disabled={props.disabled}
-        onChange={(event) => {
-          const text = event.target.value
-          setEditing(current => new Map(current).set(`${String(index)}:${field}`, text))
-          update(index, field, parseCapacity(text))
-        }}
-        onBlur={() => { settleCapacity(index, field) }}
-      />
-    </label>
+    <CapacityCombo
+      label={props.t(field === 'contextWindow' ? 'contextWindow' : 'maxTokens')}
+      value={capacityText(model, index, field)}
+      placeholder={fallback === undefined
+        ? props.t(field === 'contextWindow' ? 'contextWindowPlaceholder' : 'maxTokensPlaceholder')
+        : formatCapacity(fallback)}
+      presets={field === 'contextWindow' ? CONTEXT_WINDOW_PRESETS : MAX_TOKEN_PRESETS}
+      ariaLabel={`${props.t(field === 'contextWindow' ? 'contextWindow' : 'maxTokens')} ${String(index + 1)}`}
+      disabled={props.disabled}
+      onChange={(text) => {
+        setEditing(current => new Map(current).set(`${String(index)}:${field}`, text))
+        update(index, field, parseCapacity(text))
+      }}
+    />
   )
 
   return (
@@ -354,7 +336,7 @@ export function DeepSeekModelsEditor(props: DeepSeekModelsEditorProps): ReactNod
         type="button"
         className={styles['addModelButton']}
         disabled={props.disabled}
-        onClick={() => { props.onChange([...props.models.map(model => ({ ...model })), { id: '' }]) }}
+        onClick={() => { props.onChange([...props.models.map(model => ({ ...model })), { id: '', maxTokens: DEFAULT_MAX_TOKENS }]) }}
       >
         <IconPlusOutline16 size={14} />
         {props.t('addModel')}

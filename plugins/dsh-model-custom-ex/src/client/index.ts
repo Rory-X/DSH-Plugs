@@ -3,8 +3,8 @@
 // This plugin REPLACES the official Models settings plugin: the profile's
 // cordis.patch.yml disables the official `ui-settings-models` row, and this
 // fork re-registers the same locale dictionary, Models section, and onboarding
-// steps — the Models section differing only by two added per-model selectors
-// (vision input + reasoning effort) in ModelListEditor.tsx.
+// steps — the Models section adding per-model vision / thinking-strength
+// selectors and a per-model switch-to default.
 //
 // Because the official row is disabled (not shadowed), there is exactly one
 // "Models" nav entry, and this plugin owns the `settings.models` locale

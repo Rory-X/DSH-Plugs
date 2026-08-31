@@ -3,7 +3,7 @@ import { Button, IconChevronDownOutline14, Input, Menu } from '@deepseek-ai/dsh-
 import type { MenuItem } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SettingsScope } from '@deepseek-ai/dsh-client-runtime/client'
 import { Switch } from '@just-genius/dsh-plugin-ui'
-import { clampPanelLauncherWidth, DEFAULT_CONFIG, PANEL_LAUNCHER_WIDTH_MAX, PANEL_LAUNCHER_WIDTH_MIN, type DshCodexConfig, type TerminalShell } from '../../shared/config'
+import { clampFullSessionLoadLimit, clampPanelLauncherWidth, DEFAULT_CONFIG, FULL_SESSION_LOAD_LIMIT_MAX, FULL_SESSION_LOAD_LIMIT_MIN, FULL_SESSION_LOAD_LIMIT_PRESETS, PANEL_LAUNCHER_WIDTH_MAX, PANEL_LAUNCHER_WIDTH_MIN, type DshCodexConfig, type StickyUserBubbleMode, type TerminalShell } from '../../shared/config'
 import type { CodexKey } from '../locales'
 
 export interface CodexSettingsInjected {
@@ -74,6 +74,52 @@ function ShellMenu(props: { label: string; value: TerminalShell; t: (key: CodexK
   )
 }
 
+function StickyModeMenu(props: {
+  label: string
+  value: StickyUserBubbleMode
+  t: (key: CodexKey) => string
+  onChange: (value: StickyUserBubbleMode) => void
+}) {
+  const { label, value, t, onChange } = props
+  const [open, setOpen] = useState(false)
+  const items: readonly MenuItem[] = [
+    { id: 'running', label: t('stickyUserBubbleModeRunning') },
+    { id: 'always', label: t('stickyUserBubbleModeAlways') },
+  ]
+  const selectedLabel = items.find(item => item.id === value)?.label ?? value
+
+  return (
+    <Menu
+      open={open}
+      items={items}
+      selectedId={value}
+      onSelect={id => {
+        onChange(id as StickyUserBubbleMode)
+        setOpen(false)
+      }}
+      onClose={() => setOpen(false)}
+      align="end"
+      side="bottom"
+      portal
+      anchor={(
+        <Button
+          type="button"
+          size="sm"
+          variant="toolbar"
+          aria-label={label}
+          aria-haspopup="menu"
+          aria-expanded={open}
+          onClick={() => setOpen(current => !current)}
+          style={{ minWidth: 148, justifyContent: 'space-between', gap: 8 }}
+        >
+          <span>{selectedLabel}</span>
+          <IconChevronDownOutline14 aria-hidden="true" />
+        </Button>
+      )}
+    />
+  )
+}
+
 function NumberField(props: { label: string; value: number; min: number; max: number; step: number; onChange: (value: number) => void }) {
   return (
     <Input
@@ -116,9 +162,51 @@ function SettingsBody(props: CodexSettingsInjected) {
         <FieldRow label={t('conversationCollapseEnabled')}>
           <Switch label={t('conversationCollapseEnabled')} checked={value.conversationCollapseEnabled} onChange={next => set('conversationCollapseEnabled', next)} />
         </FieldRow>
+        <FieldRow label={t('stickyUserBubbleEnabled')}>
+          <Switch label={t('stickyUserBubbleEnabled')} checked={value.stickyUserBubbleEnabled} onChange={next => set('stickyUserBubbleEnabled', next)} />
+        </FieldRow>
+        {value.stickyUserBubbleEnabled ? (
+          <FieldRow label={t('stickyUserBubbleMode')}>
+            <StickyModeMenu label={t('stickyUserBubbleMode')} value={value.stickyUserBubbleMode} t={t} onChange={next => set('stickyUserBubbleMode', next)} />
+          </FieldRow>
+        ) : null}
+        <FieldRow label={t('fullSessionLoadEnabled')}>
+          <Switch label={t('fullSessionLoadEnabled')} checked={value.fullSessionLoadEnabled} onChange={next => set('fullSessionLoadEnabled', next)} />
+        </FieldRow>
+        {value.fullSessionLoadEnabled ? (
+          <div style={{ display: 'grid', gap: 8 }}>
+            <FieldRow label={t('fullSessionLoadLimit')}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+                {FULL_SESSION_LOAD_LIMIT_PRESETS.map(preset => (
+                  <Button
+                    key={preset}
+                    type="button"
+                    size="sm"
+                    variant={value.fullSessionLoadLimit === preset ? 'primary' : 'toolbar'}
+                    aria-pressed={value.fullSessionLoadLimit === preset}
+                    onClick={() => set('fullSessionLoadLimit', preset)}
+                  >
+                    {preset}
+                  </Button>
+                ))}
+                <NumberField
+                  label={t('fullSessionLoadLimit')}
+                  min={FULL_SESSION_LOAD_LIMIT_MIN}
+                  max={FULL_SESSION_LOAD_LIMIT_MAX}
+                  step={1}
+                  value={value.fullSessionLoadLimit}
+                  onChange={next => set('fullSessionLoadLimit', clampFullSessionLoadLimit(next))}
+                />
+              </div>
+            </FieldRow>
+          </div>
+        ) : null}
       </Group>
 
       <Group title={t('groupPanel')}>
+        <FieldRow label={t('sideChatEnabled')}>
+          <Switch label={t('sideChatEnabled')} checked={value.sideChatEnabled} onChange={next => set('sideChatEnabled', next)} />
+        </FieldRow>
         <FieldRow label={t('panelLauncherWidth')}>
           <NumberField label={t('panelLauncherWidth')} min={PANEL_LAUNCHER_WIDTH_MIN} max={PANEL_LAUNCHER_WIDTH_MAX} step={10} value={value.panelLauncherWidth} onChange={next => set('panelLauncherWidth', clampPanelLauncherWidth(next))} />
         </FieldRow>

@@ -333,12 +333,16 @@ export function apply(ctx: Context): void {
     }), 'dsh-whale-girl: job done')
   }
 
-  const on = (ctx.on as unknown as (name: string, fn: (...args: unknown[]) => void) => void).bind(ctx)
-  on('agent/request-error', () => {
+  const on = (ctx.on as unknown as (name: string, fn: (...args: unknown[]) => unknown) => void).bind(ctx)
+  on('agent/request-error', (...args: unknown[]) => {
     const now = Date.now()
     errorUntil = Math.max(errorUntil, now + configRef.errorMs)
     disappointedUntil = Math.max(disappointedUntil, now + configRef.errorMs + configRef.disappointedMs)
     broadcastEvent()
+    const next = args.at(-1)
+    // Waterfall: skipping next() swallows overflow recovery and other
+    // downstream request-error handlers (compaction-basic, llm-retry).
+    if (typeof next === 'function') return (next as () => unknown)()
   })
 
   on('agent/session-start', (payload) => {
