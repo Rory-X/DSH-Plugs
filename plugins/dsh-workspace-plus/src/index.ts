@@ -10,6 +10,7 @@ import {
   OPEN_PATH,
   PROJECT_PATH,
   SCAN_PATH,
+  SESSION_REFERENCE_PATH,
   normalizePrimaryPath,
   roleOf,
   samePath,
@@ -18,12 +19,14 @@ import {
   type RepoFolder,
   type WorkspaceBinding,
 } from './shared.ts'
+import { selectSessionHeader } from './session-reference.ts'
 import { bindBinding, deleteBinding, findBindingForCwd, listBindings, storeRoot } from './store.ts'
 
 export const name = 'dsh-workspace-plus'
 export const inject = [
   HOST_SERVICES.systemPrompt,
   HOST_SERVICES.webServer,
+  HOST_SERVICES.sessionPersistence,
 ] as const
 
 interface PromptAgent {
@@ -120,6 +123,11 @@ function acquireRoutes(ctx: Context): () => void {
       kind: 'exact',
       path: OPEN_PATH,
       handler: (req, res) => { void handleOpen(ctx, req, res) },
+    }),
+    ctx.webServer.register({
+      kind: 'exact',
+      path: SESSION_REFERENCE_PATH,
+      handler: (req, res) => { void handleSessionReference(ctx, req, res) },
     }),
   ]
   const lease: RouteLease = {
@@ -241,6 +249,44 @@ async function handleOpen(ctx: Context, req: IncomingMessage, res: ServerRespons
   }
 }
 
+async function handleSessionReference(ctx: Context, req: IncomingMessage, res: ServerResponse): Promise<void> {
+  if (!isTrustedApiRequest(ctx, req)) {
+    json(res, 403, { ok: false, message: 'forbidden' })
+    return
+  }
+  if (req.method !== 'POST') {
+    json(res, 405, { ok: false, message: 'method not allowed' })
+    return
+  }
+  let body: unknown
+  try {
+    body = await readJsonBody(req)
+  } catch (error) {
+    json(res, 400, { ok: false, message: errorMessage(error) })
+    return
+  }
+  const sessionId = readString(body, 'sessionId')
+  if (sessionId === undefined) {
+    json(res, 400, { ok: false, message: 'sessionId is required' })
+    return
+  }
+  try {
+    const header = selectSessionHeader(
+      await ctx.sessionPersistence.list(),
+      sessionId,
+      readString(body, 'cwd'),
+    )
+    const location = header === undefined ? undefined : ctx.sessionPersistence.locate(header)
+    if (location === undefined || !isAbsolute(location.path) || !isFilePath(location.path)) {
+      json(res, 404, { ok: false, message: 'session data path not found' })
+      return
+    }
+    json(res, 200, { ok: true, value: { path: location.path } })
+  } catch (error) {
+    json(res, 500, { ok: false, message: errorMessage(error) })
+  }
+}
+
 function parseBindingAction(body: unknown): ProjectAction | undefined {
   if (body === null || typeof body !== 'object') return undefined
   const value = body as Record<string, unknown>
@@ -328,6 +374,14 @@ function readJsonBody(req: IncomingMessage, limit = 256 * 1024): Promise<unknown
 function isDirectoryPath(path: string): boolean {
   try {
     return statSync(path).isDirectory()
+  } catch {
+    return false
+  }
+}
+
+function isFilePath(path: string): boolean {
+  try {
+    return statSync(path).isFile()
   } catch {
     return false
   }

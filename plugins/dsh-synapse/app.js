@@ -1,7 +1,7 @@
 const app = document.querySelector('#app')
 if ('scrollRestoration' in history) history.scrollRestoration = 'manual'
 const LEGACY_CARD_POSITIONS_KEY = 'dsh-synapse:card-positions'
-const CARD_POSITIONS_KEY = 'dsh-synapse:card-positions:v3'
+const CARD_POSITIONS_KEY = 'dsh-synapse:card-positions:v4'
 const COLLAPSED_CARDS_KEY = 'dsh-synapse:collapsed-cards:v1'
 const QUICK_PHRASES_KEY = 'dsh-synapse:quick-phrases:v1'
 const INSPECTOR_WIDTH_KEY = 'dsh-synapse:inspector-width:v1'
@@ -41,6 +41,7 @@ const savedCardPositions = (() => {
     // Drop formats that were never persisted; the current key stores drags.
     localStorage.removeItem(LEGACY_CARD_POSITIONS_KEY)
     localStorage.removeItem('dsh-synapse:card-positions:v2')
+    localStorage.removeItem('dsh-synapse:card-positions:v3')
     const value = JSON.parse(localStorage.getItem(CARD_POSITIONS_KEY) ?? '[]')
     return Array.isArray(value) ? value.filter(item => Array.isArray(item) && typeof item[0] === 'string' && item[1] !== null && Number.isFinite(item[1].x) && Number.isFinite(item[1].y)) : []
   } catch { return [] }
@@ -166,7 +167,7 @@ const state = {
   expandedMessageIds: new Set(),
   canvasCards: undefined, canvasCardsById: undefined, canvasGraph: undefined, mountedCardIds: new Set(), canvasNeedsCenter: false,
   detailScrollByThread: new Map(), detailThreadId: null, detailTargetCardId: null,
-  inspectorCardId: null, inspectorOpening: false, inspectorScrollByCard: new Map(), inspectorScrollRestoring: false,
+  inspectorCardId: null, inspectorOpening: false, inspectorScrollByCard: new Map(), inspectorScrollRestoring: false, renamingCardId: null,
   inspectorTocOpen: false, inspectorNoteSave: null,
   inspectorWidth: savedInspectorWidth, inspectorExpanded: false, inspectorTocWidth: savedInspectorTocWidth,
   dshWorkspacesFingerprint: '', workspaceThreadsFingerprint: '',
@@ -175,9 +176,10 @@ const state = {
 const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[character]))
 const formatTime = value => new Date(value).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
 const currentThread = () => state.workspace?.threads.find(thread => thread.id === state.activeId) ?? state.workspace?.threads[0] ?? null
-const threadListTitle = thread => thread.dshSessionTitle ?? thread.title ?? questionFor(thread)
+const threadListTitle = thread => firstUserQuestion(thread) ?? (isSessionLabelQuestion(thread.dshSessionTitle) || isSessionLabelQuestion(thread.title) ? '等待用户提问' : (thread.dshSessionTitle ?? thread.title ?? questionFor(thread)))
 
 function rememberBranchAnchor(sessionId, cardId) {
+  if (typeof sessionId !== 'string' || sessionId === '' || typeof cardId !== 'string' || cardId === '') return
   state.branchAnchors.set(sessionId, cardId)
   try { localStorage.setItem('dsh-synapse:branch-anchors', JSON.stringify([...state.branchAnchors])) } catch { /* Private browsing may disable local storage. */ }
 }
@@ -283,6 +285,7 @@ function resetCardPositions() {
   try {
     localStorage.removeItem(LEGACY_CARD_POSITIONS_KEY)
     localStorage.removeItem('dsh-synapse:card-positions:v2')
+    localStorage.removeItem('dsh-synapse:card-positions:v3')
   } catch { /* Private browsing may disable local storage. */ }
 }
 
@@ -331,18 +334,49 @@ function latestRootThread(threads) {
     .sort((a, b) => String(b.updatedAt ?? '').localeCompare(String(a.updatedAt ?? '')))[0]
 }
 
+/**
+ * The card footer's 详情: watch this one turn in the host's turn pane.
+ *
+ * The pane is the side-chat surface, rendered from the session's live chat
+ * nodes, so a running turn streams into it. It is a DIFFERENT surface from the
+ * card drawer: the drawer shows the turn's final output, read back from DSH's
+ * event log, while this pane replays the whole turn step by step. The two never
+ * share the right rail — opening one dismisses the other.
+ */
+function canvasCardSelection(thread, cardId) {
+  if (thread === undefined || typeof cardId !== 'string' || cardId === '') return null
+  return { activeId: thread.id, selectedCardId: cardId, inspectorCardId: cardId }
+}
+
 function watchCardTurn(thread, cardId) {
-  if (thread.dshSessionId === null || typeof cardId !== 'string') return
-  if (state.inspectorCardId !== null) closeCardInspector({ animate: false })
+  if (typeof thread?.dshSessionId !== 'string' || thread.dshSessionId === '' || typeof cardId !== 'string') return
   const card = state.canvasCardsById?.get(cardId)
-  if (thread.dshSessionId !== state.currentDsh?.id) state.mapCardSessionSwitches.add(thread.dshSessionId)
-  post('synapse:activate-session', { sessionId: thread.dshSessionId })
+  if (card === undefined || card.dshThreadId !== thread.id) return
+  if (state.inspectorCardId !== null) closeCardInspector({ animate: false })
+  // Reading another fork is local to the map. The host pane subscribes to the
+  // requested session directly, so opening 详情 must not change DSH's current
+  // session or move the canvas to that branch.
   post('synapse:watch-turn', {
     sessionId: thread.dshSessionId,
     seq: Number.isInteger(card?.sourceSeq) ? card.sourceSeq : undefined,
     turnIndex: Number.isInteger(card?.turnIndex) ? card.turnIndex : undefined,
     cardId,
   })
+}
+
+function dispatchCardSessionAction(action, thread, cardId, seq) {
+  if (action === 'watch-turn') {
+    watchCardTurn(thread, cardId)
+    return true
+  }
+  if (action !== 'open-dsh') return false
+  if (typeof thread?.dshSessionId === 'string' && thread.dshSessionId !== '') {
+    post('synapse:open-session', {
+      sessionId: thread.dshSessionId,
+      seq: seq !== undefined && seq !== '' && Number.isSafeInteger(Number(seq)) ? Number(seq) : undefined,
+    })
+  }
+  return true
 }
 
 function dropThreadsFromCanvas(removed) {
@@ -389,7 +423,6 @@ async function removeBranch(thread) {
   if (thread.parentId === null) return
   if (!window.confirm('删除这个分支？主会话会保留。')) return
   const parent = (state.workspace?.threads ?? []).find(item => item.id === thread.parentId)
-  dismissTurnPane()
   if (state.inspectorCardId !== null) closeCardInspector({ animate: false })
   const removed = threadRemovalSet(thread)
   for (const item of state.workspace?.threads ?? []) {
@@ -447,8 +480,8 @@ function messagesFromEvents(events) {
     // Runtime-context snapshots and <system-reminder> blocks arrive as
     // user-role messages but are not real user turns: they must not become
     // their own conversation card.
-    const injected = /^(?:Current runtime context\. This snapshot supersedes earlier runtime-context snapshots\.|<(?:system-reminder|system|context|environment|reminder)\b[^>]*>)/i
-    if (event?.type === 'user/message' && text && !injected.test(text.trimStart())) return [{ kind: 'user', text, at: event.time, sourceSeq: event.seq }]
+    const kind = event?.data?.source?.kind ?? event?.data?.message?.source?.kind
+    if (event?.type === 'user/message' && text && (kind === undefined || kind === 'user') && !isInjectedCardText(text)) return [{ kind: 'user', text, at: event.time, sourceSeq: event.seq }]
     if (event?.type === 'assistant/message' && text) return [{ kind: 'assistant', text, at: event.time, sourceSeq: event.seq }]
     return []
   })
@@ -501,7 +534,9 @@ function historyForCard(thread, cardId) {
 }
 
 function canReplaceView() {
-  return state.draft === null && !state.dragging && !state.canvasGesture && Date.now() >= state.canvasRefreshAfter && !document.activeElement?.matches('textarea')
+  // renamingCardId: a background re-render would remount the rename input and
+  // drop the text being typed, same class of bug as the draft composer.
+  return state.draft === null && state.renamingCardId === null && !state.dragging && !state.canvasGesture && Date.now() >= state.canvasRefreshAfter && !document.activeElement?.matches('textarea')
 }
 
 function deferCanvasRefresh(delay = 700) {
@@ -531,9 +566,27 @@ function restoreInspectorScroll(scrollTop) {
   })
 }
 
+/**
+ * The DSH workspace the current session belongs to.
+ *
+ * `dsh-ungrouped` is a mixed bucket: every session the host has not bound to a
+ * project lands in it (measured: 237 sessions spanning 10 different projects).
+ * Scoping the canvas to it wrecked family resolution — a fork's parent and
+ * sibling sessions are grouped by their own cwd, so inside the mixed bucket the
+ * fork could only resolve to itself, which rendered as "just the one turn card
+ * after the fork". Only fall back to the bucket when the session really is
+ * ungrouped (no cwd of its own to match).
+ */
 function currentDshWorkspace() {
   const id = state.currentDsh?.id
-  return typeof id === 'string' ? state.dshWorkspaces.find(workspace => workspace.sessionIds.includes(id)) : undefined
+  if (typeof id !== 'string') return undefined
+  const cwd = state.currentDsh?.cwd
+  if (typeof cwd === 'string' && cwd !== '') {
+    const byCwd = state.dshWorkspaces.find(workspace => workspace.path === cwd && workspace.sessionIds.includes(id))
+    if (byCwd !== undefined) return byCwd
+  }
+  const containing = state.dshWorkspaces.filter(workspace => workspace.sessionIds.includes(id))
+  return containing.find(workspace => workspace.id !== 'dsh-ungrouped') ?? containing[0]
 }
 
 function selectedDshWorkspace() {
@@ -545,28 +598,60 @@ function currentDshThread(threads = state.workspace?.threads ?? []) {
   return typeof id === 'string' ? threads.find(thread => thread.dshSessionId === id) : undefined
 }
 
-// A workspace can hold dozens of unrelated sessions. The map shows the current
-// DSH session and the fork family it belongs to — ancestors and their
-// descendants — so a branch stays on the same canvas as the turn it left.
-// Unrelated sessions stay reachable by switching the DSH session itself.
-// Until the current session has a projected thread, fall back to the whole
-// workspace so the canvas is never blank during that race.
+/**
+ * The one conversation a card belongs to: a session, its ancestors, and every
+ * fork taken from any of them.
+ *
+ * `thread.parentId` is Synapse's own node id, which only exists once the
+ * parent has been projected into this workspace. DSH also records the fork on
+ * the session itself (`sourceParentSessionId`), and that link survives the
+ * parent's projection being missing — a fork restored from an archived session,
+ * or one whose parent has not been synced yet. Following both is what keeps a
+ * branch attached to its conversation instead of floating as an orphan root
+ * (which is also what sends it to the canvas origin).
+ *
+ * @param threads - the workspace's threads.
+ * @param start - the thread to build the family around.
+ * @returns the family's threads, in the workspace's own order.
+ */
 function threadFamily(threads, start) {
   if (start === undefined) return []
   const byId = new Map(threads.map(thread => [thread.id, thread]))
+  const bySessionId = new Map()
+  for (const thread of threads) {
+    if (typeof thread.dshSessionId === 'string' && thread.dshSessionId !== '') bySessionId.set(thread.dshSessionId, thread)
+  }
   const ids = new Set()
   const seen = new Set()
-  let cursor = start
-  while (cursor !== undefined && !seen.has(cursor.id)) {
+  const queue = [start]
+  while (queue.length > 0) {
+    const cursor = queue.shift()
+    if (cursor === undefined || seen.has(cursor.id)) continue
     seen.add(cursor.id)
     ids.add(cursor.id)
-    cursor = cursor.parentId === null ? undefined : byId.get(cursor.parentId)
+    // Up: Synapse's parent node, then DSH's own parent session.
+    const parentId = cursor.parentId ?? null
+    if (parentId !== null && parentId !== undefined && byId.has(parentId)) queue.push(byId.get(parentId))
+    const sourceParentSessionId = cursor.sourceParentSessionId
+    if (typeof sourceParentSessionId === 'string' && sourceParentSessionId !== '') {
+      const viaSession = bySessionId.get(sourceParentSessionId)
+      if (viaSession !== undefined) queue.push(viaSession)
+    }
   }
+  // Down: every fork taken from any member, at any depth. Repeated until the
+  // set stops growing so a grandchild links even when its parent is only added
+  // on a later pass.
   let changed = true
   while (changed) {
     changed = false
     for (const thread of threads) {
-      if (ids.has(thread.id) || thread.parentId === null || !ids.has(thread.parentId)) continue
+      if (ids.has(thread.id)) continue
+      const parentId = thread.parentId ?? null
+      const linkedByNode = parentId !== null && parentId !== undefined && ids.has(parentId)
+      const linkedBySession = typeof thread.sourceParentSessionId === 'string'
+        && thread.sourceParentSessionId !== ''
+        && [...ids].some(id => byId.get(id)?.dshSessionId === thread.sourceParentSessionId)
+      if (!linkedByNode && !linkedBySession) continue
       ids.add(thread.id)
       changed = true
     }
@@ -574,13 +659,37 @@ function threadFamily(threads, start) {
   return threads.filter(thread => ids.has(thread.id))
 }
 
+/**
+ * The threads the canvas draws.
+ *
+ * Scoped to the fork FAMILY of DSH's CURRENT session (see `threadFamily`):
+ * the current session's ancestors, plus every fork taken from any of them.
+ * The map is the whole branch tree the user is in — ancestor sessions AND
+ * their fork branches — so sibling branches are part of the picture, never
+ * hidden. Unrelated conversations stay off the canvas (a workspace holds
+ * dozens of them); they remain reachable by switching the DSH session.
+ *
+ * The active thread joins as a second anchor: it is where the user just
+ * clicked, and a just-created branch stays anchored on it while the host
+ * keeps the parent as the current session. It is also the fallback when
+ * `currentDsh` names a session whose thread has not been projected yet —
+ * falling back to the whole workspace there would flash every conversation
+ * onto the canvas.
+ */
 function visibleThreads() {
   const threads = state.workspace?.threads ?? []
-  const id = state.currentDsh?.id
-  if (typeof id !== 'string') return threads
-  const current = threads.find(thread => thread.dshSessionId === id)
-  if (current === undefined) return threads
-  return threadFamily(threads, current)
+  const current = currentDshThread(threads)
+  const active = state.activeId === null || state.activeId === undefined ? undefined : threads.find(thread => thread.id === state.activeId)
+  const anchor = current ?? active
+  if (anchor === undefined) return threads
+  const visible = new Set()
+  for (const thread of threadFamily(threads, anchor)) visible.add(thread.id)
+  // A just-created branch is anchored on the active thread; union it in so
+  // the branch the user is watching is never the one node left off the map.
+  if (active !== undefined && !visible.has(active.id)) {
+    for (const thread of threadFamily(threads, active)) visible.add(thread.id)
+  }
+  return threads.filter(thread => visible.has(thread.id))
 }
 
 function workspaceChoices() {
@@ -611,9 +720,29 @@ function workspaceGraph(workspaceId) {
   return value
 }
 
+/**
+ * Whether a projected thread belongs to a workspace that has already loaded
+ * its parent — by Synapse node id or by DSH's own parent session id.
+ *
+ * A just-forked child can land in the store before DSH adds it to
+ * `workspace.sessionIds`. Following only `parentId` dropped those whose
+ * Synapse parent link had not been written yet, so the branch card and its
+ * connector vanished until the next poll.
+ */
+function isWorkspaceThreadDescendant(thread, loadedIds, loaded) {
+  const parentId = thread.parentId ?? null
+  if (parentId !== null && loadedIds.has(parentId)) return true
+  const sourceParentSessionId = thread.sourceParentSessionId
+  if (typeof sourceParentSessionId !== 'string' || sourceParentSessionId === '') return false
+  return loaded.some(item => item.dshSessionId === sourceParentSessionId)
+}
+
 async function threadsForDshWorkspace(workspace) {
-  if (workspace.sessionIds.length === 0) return []
-  const requested = new Set(workspace.sessionIds)
+  const requested = new Set(workspace.sessionIds ?? [])
+  // Only the current session's own graph can answer "is there anything to
+  // draw", so an empty DSH session list is allowed to fall through to the
+  // current-session lookup below instead of short-circuiting to a blank map.
+  if (requested.size === 0 && state.currentDsh?.id === undefined && state.activeId === null) return []
   // Every workspace's full graph used to be fetched to find the sessions of
   // one workspace. v5 payloads are small, but the 1s poll still re-fetched all
   // of them, so the per-workspace graph is cached for the duration of a tick.
@@ -632,13 +761,72 @@ async function threadsForDshWorkspace(workspace) {
   while (changed) {
     changed = false
     for (const thread of all) {
-      if (loadedIds.has(thread.id) || thread.parentId === null || !loadedIds.has(thread.parentId)) continue
+      if (loadedIds.has(thread.id) || !isWorkspaceThreadDescendant(thread, loadedIds, loaded)) continue
       loaded.push(thread)
       loadedIds.add(thread.id)
       changed = true
     }
   }
+  // A session DSH no longer lists — one the user switched back to, or an
+  // archived conversation — still owns a fork tree the map must draw.
+  // Filtering strictly by the live session list dropped that whole family and
+  // left the canvas empty ("无会话") for exactly the conversations that have
+  // the most branches, so the current session's family is always kept.
+  const anchorSessionIds = [state.currentDsh?.id, all.find(thread => thread.id === state.activeId)?.dshSessionId]
+  for (const sessionId of anchorSessionIds) {
+    if (typeof sessionId !== 'string' || sessionId === '') continue
+    const anchor = all.find(thread => thread.dshSessionId === sessionId)
+    if (anchor === undefined) continue
+    for (const thread of threadFamily(all, anchor)) {
+      if (loadedIds.has(thread.id)) continue
+      loaded.push(thread)
+      loadedIds.add(thread.id)
+    }
+  }
   return loaded
+}
+
+/**
+ * Keep just-created branches that a workspace reload has not projected yet.
+ *
+ * Forking writes the node locally (and to the store) then the host immediately
+ * re-sends the workspace list. That fetch can race `store.branch`: the new
+ * session is missing, or it arrives as an unlinked root. Replacing
+ * `state.workspace.threads` then drops the card and its connector until the
+ * next poll. Re-attach the local parent/anchor, and keep pending/fresh forks
+ * the fetch omitted.
+ */
+function keepLiveCanvasThreads(fetched) {
+  const local = state.workspace?.threads ?? []
+  if (local.length === 0) return fetched
+  const localById = new Map(local.map(thread => [thread.id, thread]))
+  const localBySession = new Map()
+  for (const thread of local) {
+    if (typeof thread.dshSessionId === 'string' && thread.dshSessionId !== '') localBySession.set(thread.dshSessionId, thread)
+  }
+  const adoptLink = (thread, localThread) => {
+    if (localThread === undefined) return thread
+    let next = thread
+    if ((next.parentId === null || next.parentId === undefined) && localThread.parentId != null) next = { ...next, parentId: localThread.parentId }
+    if ((next.sourceParentSessionId === null || next.sourceParentSessionId === undefined) && typeof localThread.sourceParentSessionId === 'string') next = { ...next, sourceParentSessionId: localThread.sourceParentSessionId }
+    if ((next.anchorCardId === null || next.anchorCardId === undefined) && typeof localThread.anchorCardId === 'string') next = { ...next, anchorCardId: localThread.anchorCardId }
+    if (!Number.isSafeInteger(next.sourceAnchorSeq) && Number.isSafeInteger(localThread.sourceAnchorSeq)) next = { ...next, sourceAnchorSeq: localThread.sourceAnchorSeq }
+    return next
+  }
+  const merged = fetched.map(thread => adoptLink(thread, localById.get(thread.id) ?? (typeof thread.dshSessionId === 'string' ? localBySession.get(thread.dshSessionId) : undefined)))
+  const seenIds = new Set(merged.map(thread => thread.id))
+  const seenSessions = new Set(merged.map(thread => thread.dshSessionId).filter(id => typeof id === 'string' && id !== ''))
+  const extras = []
+  for (const thread of local) {
+    if (seenIds.has(thread.id)) continue
+    if (typeof thread.dshSessionId === 'string' && thread.dshSessionId !== '' && seenSessions.has(thread.dshSessionId)) continue
+    const pending = typeof thread.dshSessionId === 'string' && state.pendingReplies.has(thread.dshSessionId)
+    if (!pending && !isFreshBlankFork(thread)) continue
+    extras.push(thread)
+    seenIds.add(thread.id)
+    if (typeof thread.dshSessionId === 'string' && thread.dshSessionId !== '') seenSessions.add(thread.dshSessionId)
+  }
+  return extras.length === 0 ? merged : [...merged, ...extras]
 }
 
 async function openDshWorkspace(id, { renderAfter = true, preserveCanvasCamera = false } = {}) {
@@ -646,7 +834,7 @@ async function openDshWorkspace(id, { renderAfter = true, preserveCanvasCamera =
   if (workspace === undefined) return false
   const load = ++state.workspaceLoad
   state.selectedDshWorkspaceId = id
-  const threads = await threadsForDshWorkspace(workspace)
+  const threads = keepLiveCanvasThreads(await threadsForDshWorkspace(workspace))
   if (load !== state.workspaceLoad) return true
   const nextWorkspaceId = `dsh:${workspace.id}`
   const nextLayout = threadsLayoutFingerprint(threads)
@@ -655,7 +843,12 @@ async function openDshWorkspace(id, { renderAfter = true, preserveCanvasCamera =
   state.workspace = { id: nextWorkspaceId, title: workspace.title, cwd: workspace.path, threads }
   state.workspaceThreadsFingerprint = nextLayout
   const currentThread = currentDshThread(state.workspace.threads)
-  state.activeId = currentThread?.id ?? (state.workspace.threads.some(thread => thread.id === state.activeId) ? state.activeId : state.workspace.threads[0]?.id ?? null)
+  // Keep the user's selection across poll reloads: a just-created branch is
+  // anchored on it, and resetting to the current session here would drop the
+  // branch's chain from `visibleThreads` a beat after it appeared. Real
+  // session switches still move `activeId` — via the current-session message
+  // handler, not this reload path.
+  state.activeId = state.workspace.threads.some(thread => thread.id === state.activeId) ? state.activeId : (currentThread?.id ?? state.workspace.threads[0]?.id ?? null)
   const revealed = currentThread !== undefined && revealConversationThread(conversationCards(visibleThreads()), currentThread.id)
   // List ticks and the 1s poll reopen this workspace constantly. Remounting
   // the canvas there is what snapped the card inspector back to the top and
@@ -707,6 +900,21 @@ function nextLiveCardAnswer({ hasContent, hasPending, liveText, nextText }) {
   return { action: 'replace', text }
 }
 
+function nextLiveReply(previous, running, nextText) {
+  const text = typeof nextText === 'string' ? nextText : ''
+  if (running === true) return { ...previous, running: true, text }
+  const finalText = text !== '' ? text : (typeof previous?.text === 'string' ? previous.text : '')
+  return finalText === '' ? null : { ...previous, running: false, text: finalText }
+}
+
+function projectedReplyHasSettled(thread, question) {
+  const turns = Array.isArray(thread?.turns) ? thread.turns : []
+  const target = typeof question === 'string' && question !== ''
+    ? [...turns].reverse().find(turn => turn?.question === question)
+    : turns.at(-1)
+  return target !== undefined && ((target.answer !== null && target.answer !== undefined) || (target.error !== null && target.error !== undefined))
+}
+
 async function refreshSummaries({ renderAfter = true } = {}) {
   const before = summariesFingerprint(state.summaries)
   const body = await api('/synapse/api/workspaces')
@@ -716,7 +924,16 @@ async function refreshSummaries({ renderAfter = true } = {}) {
   if (state.selectedDshWorkspaceId === null && current !== null && !state.summaries.some(item => item.id === current)) state.workspace = null
   const selected = selectedDshWorkspace()
   if (selected !== undefined && (changed || state.workspace === null)) await openDshWorkspace(selected.id, { renderAfter })
-  else if (state.workspace === null && state.summaries.length > 0) await openWorkspace(state.summaries[0].id)
+  else if (state.workspace === null && state.summaries.length > 0) {
+    // Never fall back to an arbitrary workspace: `state.summaries` is in store
+    // order, so summaries[0] is some unrelated project (measured: e-pi, 3
+    // threads) — opening it flashed a foreign conversation onto the canvas and
+    // left the real one unresolvable. Prefer the projection whose cwd matches
+    // the current session; otherwise wait for the host's workspace list.
+    const cwd = state.currentDsh?.cwd
+    const match = typeof cwd === 'string' && cwd !== '' ? state.summaries.find(summary => summary.cwd === cwd) : undefined
+    if (match !== undefined) await openWorkspace(match.id, { renderAfter })
+  }
   else if (renderAfter && changed && canReplaceView()) render()
   return changed
 }
@@ -739,6 +956,32 @@ async function refreshProjection() {
   if (state.selectedDshWorkspaceId !== null) await openDshWorkspace(state.selectedDshWorkspaceId)
   else await openWorkspace(state.workspace.id)
   return true
+}
+
+async function refreshCompletedReply(sessionId, question, attempt = 0) {
+  try {
+    invalidateGraphCache()
+    const workspaceId = state.selectedDshWorkspaceId ?? currentDshWorkspace()?.id
+    if (typeof workspaceId === 'string' && workspaceId !== '') {
+      await openDshWorkspace(workspaceId, { renderAfter: false, preserveCanvasCamera: true })
+    } else if (typeof state.workspace?.id === 'string' && !state.workspace.id.startsWith('dsh:')) {
+      await openWorkspace(state.workspace.id, { renderAfter: false })
+    }
+  } catch {
+    // The projection queue may still be committing this final event. The
+    // bounded retry below will read it once the in-memory store catches up.
+  }
+  const thread = state.workspace?.threads.find(item => item.dshSessionId === sessionId)
+  const settled = projectedReplyHasSettled(thread, question)
+  if (settled) {
+    state.pendingReplies.delete(sessionId)
+    state.liveReplies.delete(sessionId)
+  }
+  if (canReplaceView()) renderPreservingDetailScroll()
+  if (!settled && attempt < 2) {
+    const delay = attempt === 0 ? 250 : 750
+    window.setTimeout(() => { void refreshCompletedReply(sessionId, question, attempt + 1) }, delay)
+  }
 }
 
 function openNewSession() {
@@ -812,7 +1055,12 @@ async function submitDraft() {
       state.draft = null
       render()
       window.setTimeout(() => {
-        void refreshProjection().catch(() => {})
+        void refreshProjection().then(() => {
+          // The projected card lands on a new root lane at the bottom of the
+          // canvas; bring it into view once it exists.
+          const thread = state.workspace?.threads.find(item => item.dshSessionId === session.id)
+          if (thread !== undefined) revealThreadLatestCard(thread.id)
+        }).catch(() => {})
       }, 150)
       return
     }
@@ -823,24 +1071,88 @@ async function submitDraft() {
       await sendMessage(parent, text)
       return
     }
-    const session = await dshRpc('synapse:fork-session', { sessionId: parent.dshSessionId, atSeq: draft.atSeq })
-    state.mapCardSessionSwitches.add(session.id)
-    if (draft.anchorId !== undefined) rememberBranchAnchor(session.id, draft.anchorId)
-    const result = await api(`/synapse/api/threads/${parent.id}/branch`, { method: 'POST', body: JSON.stringify({ title: text.slice(0, 42), dshSessionId: session.id, dshSessionTitle: session.title, position: branchPosition }) })
-    if (state.workspace !== null && !state.workspace.threads.some(thread => thread.id === result.thread.id || thread.dshSessionId === result.thread.dshSessionId)) state.workspace.threads.push(result.thread)
-    state.activeId = result.thread.id
+    // The card must exist the instant the user submits. `synapse:fork-session`
+    // round-trips through the host, and DSH only commits the message after
+    // that; waiting for either left the branch invisible for seconds (and it
+    // never appeared at all when the fork RPC failed). Insert a placeholder
+    // node now, then reconcile it with the real session once it exists.
+    const optimisticId = `pending:${parent.id}:${Date.now()}`
+    const optimistic = {
+      id: optimisticId,
+      title: text.slice(0, 42),
+      parentId: parent.id,
+      sourceParentSessionId: typeof parent.dshSessionId === 'string' ? parent.dshSessionId : null,
+      dshSessionId: null,
+      dshSessionTitle: null,
+      anchorCardId: draft.anchorId,
+      color: parent.color,
+      position: branchPosition,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      turns: [],
+      pendingProcess: [],
+      processIds: [],
+      optimistic: true,
+    }
+    if (state.workspace !== null) state.workspace.threads.push(optimistic)
+    state.activeId = optimisticId
     state.draft = null
-    state.pendingReplies.set(result.thread.dshSessionId, { text, at: Date.now() })
+    state.pendingReplies.set(optimisticId, { text, at: Date.now() })
+    revealConversationThread(conversationCards(visibleThreads()), optimisticId)
     // Deliberately NOT activating the fork. Switching DSH's current session
     // makes the host leave the map for the conversation view, which defeats
     // the point of branching from a card: the user wants to stay on the map
-    // and watch the branch run. The branch does not need to be current —
-    // `syncLiveSessions` subscribes to every listed session, so its streaming
-    // answer arrives through `synapse:live-reply` either way.
+    // and watch the branch run.
     render()
+    // The layout parks a new branch one lane per earlier sibling subtree
+    // below its parent — far off-screen in a branch-heavy conversation.
+    // Bring the card into view so the user watches it stream.
+    revealThreadLatestCard(optimisticId)
+
+    let result
+    try {
+      const session = await dshRpc('synapse:fork-session', { sessionId: parent.dshSessionId, atSeq: draft.atSeq })
+      state.mapCardSessionSwitches.add(session.id)
+      // Persist the branch point server-side too. A localStorage anchor
+      // survives a reload but not a cleared profile, a new machine, or tab.
+      const anchorCard = draft.anchorId === undefined ? undefined : state.canvasCardsById?.get(draft.anchorId)
+      rememberBranchAnchor(session.id, draft.anchorId)
+      result = await api(`/synapse/api/threads/${parent.id}/branch`, { method: 'POST', body: JSON.stringify({ title: text.slice(0, 42), dshSessionId: session.id, dshSessionTitle: session.title, position: branchPosition, anchorCardId: draft.anchorId, sourceAnchorSeq: Number.isSafeInteger(anchorCard?.answerSeq) ? anchorCard.answerSeq : (Number.isSafeInteger(anchorCard?.sourceSeq) ? anchorCard.sourceSeq : undefined) }) })
+      if (typeof parent.dshSessionId === 'string' && parent.dshSessionId !== '') result.thread.sourceParentSessionId ??= parent.dshSessionId
+    } catch (error) {
+      // The card is already on the canvas; keep it and show why the branch
+      // did not take, instead of silently dropping it.
+      if (state.workspace !== null) {
+        state.workspace.threads = state.workspace.threads.filter(thread => thread.id !== optimisticId)
+      }
+      state.pendingReplies.delete(optimisticId)
+      if (state.activeId === optimisticId) state.activeId = parent.id
+      render()
+      if (draft.kind === 'branch') {
+        if (state.draft !== null) state.draft = { ...draft, sending: false }
+      } else {
+        state.draft = { ...draft, sending: false }
+      }
+      throw error
+    }
+    // Swap the placeholder for the real node, keeping the pending reply on the
+    // session id so streaming lands on it.
+    if (state.workspace !== null) {
+      const index = state.workspace.threads.findIndex(thread => thread.id === optimisticId)
+      if (index !== -1) state.workspace.threads[index] = { ...result.thread, anchorCardId: result.thread.anchorCardId ?? draft.anchorId }
+      else if (!state.workspace.threads.some(thread => thread.dshSessionId === result.thread.dshSessionId)) state.workspace.threads.push(result.thread)
+    }
+    state.pendingReplies.delete(optimisticId)
+    state.activeId = result.thread.id
+    state.pendingReplies.set(result.thread.dshSessionId, { text, at: Date.now() })
+    render()
+    revealThreadLatestCard(result.thread.id)
     await dshRpc('synapse:send-message', { sessionId: result.thread.dshSessionId, text })
     void loadThreadHistory(result.thread)
-    await refreshProjection()
+    // A workspace reload racing this POST used to replace the optimistic
+    // branch with an unlinked root (or drop it). Give the store a beat to
+    // settle; the card and connector are already on the canvas.
+    window.setTimeout(() => { void refreshProjection().catch(() => {}) }, 400)
   } catch (error) {
     if (draft.kind === 'branch') {
       state.pendingReplies.delete(state.workspace?.threads.find(thread => thread.id === state.activeId)?.dshSessionId)
@@ -862,27 +1174,39 @@ function threadsById() { return new Map((state.workspace?.threads ?? []).map(thr
  * events yet), the pending question and its streaming answer are appended as a
  * synthetic tail card so the canvas never blinks back to the previous turn.
  */
+function pendingReplyFor(thread) {
+  const bySession = state.pendingReplies.get(thread.dshSessionId)
+  if (bySession !== undefined) return { key: thread.dshSessionId, pending: bySession }
+  const byThread = state.pendingReplies.get(thread.id)
+  if (byThread !== undefined) return { key: thread.id, pending: byThread }
+  return undefined
+}
+
 function turnsFor(thread) {
   const turns = Array.isArray(thread.turns) ? thread.turns : []
-  const pending = state.pendingReplies.get(thread.dshSessionId)
-  if (pending === undefined) return turns
+  const found = pendingReplyFor(thread)
+  if (found === undefined) return turns
+  const { key, pending } = found
   // The turn has landed in the projection: the synthetic tail is obsolete.
-  if (turns.some(turn => turn.question === pending.text)) {
-    state.pendingReplies.delete(thread.dshSessionId)
-    state.liveReplies.delete(thread.dshSessionId)
+  const projected = turns.find(turn => turn.question === pending.text)
+  if (projected !== undefined) {
+    if (projected.answer !== null && projected.answer !== undefined || projected.error !== null && projected.error !== undefined) {
+      state.pendingReplies.delete(key)
+      state.liveReplies.delete(key)
+    }
     return turns
   }
-  const live = state.liveReplies.get(thread.dshSessionId)
+  const live = state.liveReplies.get(key)
   const tail = {
     seq: null,
     at: new Date(pending.at).toISOString(),
     question: pending.text,
-    answer: live?.running === true ? live.text : null,
+    answer: typeof live?.text === 'string' && live.text !== '' ? live.text : null,
     answerSeq: null,
     error: null,
     processCount: 0,
     processIds: [],
-    pending: true,
+    pending: live?.running !== false,
   }
   return [...turns, tail]
 }
@@ -899,15 +1223,43 @@ function latestMessage(thread, kind) {
   return turn === undefined ? undefined : { text: turn.answer, sourceSeq: turn.answerSeq }
 }
 
-function questionFor(thread) { return latestMessage(thread, 'user')?.text ?? thread.dshSessionTitle ?? '等待用户提问' }
+function questionFor(thread) {
+  const latest = latestMessage(thread, 'user')?.text
+  if (isHumanCardQuestion(latest)) return latest
+  return firstUserQuestion(thread) ?? '等待用户提问'
+}
 function answerFor(thread) { return latestMessage(thread, 'assistant') ?? null }
 
+// Inline formatting is applied to already-escaped text, so every rule below
+// matches against entity references (&quot;, &amp; …) rather than raw
+// characters — and must never produce markup the escaping removed.
 function inlineMarkdown(text) {
   return escapeHtml(text)
+    // A code span wins over every other rule: `**` inside backticks is literal.
     .replace(/`([^`\n]+)`/g, '<code>$1</code>')
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
     .replace(/~~([^~]+)~~/g, '<s>$1</s>')
     .replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, '$1<em>$2</em>')
+    // [label](url) — the url is scheme-checked, so a `javascript:` target can
+    // never become a clickable link in a rendered answer.
+    .replace(/\[([^\]\n]+)\]\(([^)\s]+)\)/g, (match, label, url) => (safeLinkUrl(url) === null ? match : `<a href="${safeLinkUrl(url)}" target="_blank" rel="noreferrer noopener">${label}</a>`))
+}
+
+/**
+ * A link target that is safe to put in an href.
+ *
+ * Rendered answers are assembled from escaped HTML, so a single permissive
+ * link rule would be the one place an attacker-chosen scheme reaches the DOM.
+ * Only http(s), mailto and same-page anchors are allowed; everything else is
+ * left as literal text.
+ */
+function safeLinkUrl(rawUrl) {
+  const url = String(rawUrl ?? '').trim()
+  if (url === '' || /[^\x21-\x7e]/.test(url)) return null
+  if (/^(https?:\/\/|mailto:)/i.test(url)) return url
+  if (url.startsWith('#')) return url
+  if (/^[\w./-]+$/.test(url) && !url.includes(':')) return url
+  return null
 }
 
 const tableCells = line => {
@@ -930,9 +1282,11 @@ const tableAlignments = line => tableCells(line).map(cell => {
   return 'left'
 })
 
-const isStructuralBoundary = line => /^(#{1,6})\s+/.test(line)
-  || /^[-*+]\s+/.test(line)
-  || /^\d+[.)]\s+/.test(line)
+const isStructuralBoundary = line => /^ {0,3}#{1,6}\s+/.test(line)
+  || /^ {0,3}[-*+]\s+/.test(line)
+  || /^ {0,3}\d+[.)]\s+/.test(line)
+  || isQuoteLine(line)
+  || isHorizontalRule(line)
 
 const isTableRow = line => {
   if (typeof line !== 'string' || isStructuralBoundary(line)) return false
@@ -1000,6 +1354,101 @@ function markdownHeadings(text) {
   return headings
 }
 
+const isHorizontalRule = line => /^ {0,3}(?:-[ \t]*){3,}$/.test(line) || /^ {0,3}(?:\*[ \t]*){3,}$/.test(line) || /^ {0,3}(?:_[ \t]*){3,}$/.test(line)
+
+/**
+ * A setext heading: a line of text underlined by `===` (h1) or `---` (h2).
+ *
+ * `---` is ambiguous — it is also a thematic break — and the difference is
+ * whether a paragraph sits directly above it. Checking that here keeps
+ * `标题\n---` a heading while an `---` after a blank line stays a rule. Markdown
+ * sources produce both constantly, and treating every `---` as a rule is what
+ * turned documents' section titles into loose paragraphs.
+ */
+const setextUnderlineOf = line => {
+  if (/^ {0,3}=+[ \t]*$/.test(line)) return 1
+  if (/^ {0,3}(?:-[ \t]*){3,}$/.test(line)) return 2
+  return null
+}
+
+// Block-level openers, checked in order by the parser below. A line that is
+// none of these continues whatever block is already open.
+const QUOTE_LINE = /^ {0,3}>\s?/
+const isQuoteLine = line => QUOTE_LINE.test(line)
+const isBlockOpener = line => /^#{1,6}\s+/.test(line)
+  || /^ {0,3}[-*+]\s+/.test(line)
+  || /^ {0,3}\d+[.)]\s+/.test(line)
+  || isHorizontalRule(line)
+  || isQuoteLine(line)
+
+// List items in the wild are indented by continuation text (`- a\n  b`) and by
+// nesting (`  - a`). Indenting the marker by up to one tab keeps a nested list
+// nested instead of flattening it into the paragraph above.
+const LIST_INDENT = /^(\s*)([-*+]|\d+[.)])\s+(.+)$/
+const listIndentOf = line => {
+  const match = LIST_INDENT.exec(line)
+  if (match === null) return null
+  // A tab counts as a nesting level; anything wider is a code block, not a list.
+  const indent = match[1].replace(/\t/g, '  ').length
+  if (indent > 3) return null
+  return { indent, ordered: /\d/.test(match[2]), text: match[3], marker: match[2] }
+}
+
+/**
+ * Render one list, recursing into the items' own body.
+ *
+ * A list item is not one line: `- 标题` is usually followed by an indented
+ * paragraph, a nested list, or a code block. Flattening those into the item's
+ * first line is what made rendered answers look like one dense wall of text,
+ * so an item collects its continuation lines and re-parses them as blocks.
+ *
+ * @returns `{ html, next }` — the markup and the next unparsed line index.
+ */
+function renderMarkdownList(lines, index, baseIndent) {
+  const first = listIndentOf(lines[index])
+  const ordered = first.ordered
+  const start = /^\d+$/.test(first.marker) ? Number(first.marker) : Number.parseInt(first.marker, 10)
+  const items = []
+  while (index < lines.length) {
+    const item = listIndentOf(lines[index])
+    if (item === null || item.indent > baseIndent) break
+    if (item.indent < baseIndent) break
+    // A different marker at the same depth starts a NEW list (`-` then `*`).
+    if (items.length > 0 && (item.ordered !== ordered || item.indent !== baseIndent)) break
+    const body = [item.text]
+    index += 1
+    // Two blank lines end the list; one blank line only ends it when the next
+    // line is not indented continuation.
+    let blankRun = 0
+    while (index < lines.length) {
+      const line = lines[index]
+      if (line.trim() === '') {
+        blankRun += 1
+        if (blankRun > 1) { index += 1; break }
+        const following = lines[index + 1]
+        const continuation = following !== undefined && following.trim() !== '' && /^\s{2,}/.test(following.replace(/\t/g, '  '))
+        if (!continuation) break
+        body.push('')
+        index += 1
+        continue
+      }
+      // Any block opener at column 0 ends the item; indented openers continue.
+      const indent = /^[ \t]*/.exec(line)[0].replace(/\t/g, '  ').length
+      if (indent <= baseIndent && isBlockOpener(line)) break
+      if (indent <= baseIndent && listIndentOf(line) !== null) break
+      blankRun = 0
+      body.push(line.slice(Math.min(line.length, baseIndent + 2)))
+      index += 1
+    }
+    items.push(`<li>${markdownBlock(body.join('\n'))}</li>`)
+  }
+  const tag = ordered ? 'ol' : 'ul'
+  // A list that starts at 3 must stay numbered from 3. Rendering every list
+  // from 1 renumbers the author's own steps, which reads as a different answer.
+  const startAttribute = ordered && Number.isSafeInteger(start) && start !== 1 ? ` start="${start}"` : ''
+  return { html: `<${tag}${startAttribute}>${items.join('')}</${tag}>`, next: index }
+}
+
 let headingCounter = 0
 function markdownBlock(text) {
   const lines = text.split('\n')
@@ -1007,7 +1456,7 @@ function markdownBlock(text) {
   for (let index = 0; index < lines.length;) {
     const line = lines[index]
     if (line.trim() === '') { index++; continue }
-    const heading = /^(#{1,6})\s+(.+)$/.exec(line)
+    const heading = /^ {0,3}(#{1,6})\s+(.+?)\s*#*\s*$/.exec(line)
     if (heading !== null) {
       const level = heading[1].length
       headingCounter += 1
@@ -1015,18 +1464,25 @@ function markdownBlock(text) {
       index++
       continue
     }
-    const unordered = /^[-*+]\s+(.+)$/.exec(line)
-    const ordered = /^\d+[.)]\s+(.+)$/.exec(line)
-    if (unordered !== null || ordered !== null) {
-      const matcher = unordered === null ? /^\d+[.)]\s+(.+)$/ : /^[-*+]\s+(.+)$/
-      const items = []
+    if (isHorizontalRule(line)) { output.push('<hr>'); index++; continue }
+    if (isQuoteLine(line)) {
+      // A blockquote is a document in miniature: headings, lists, code and
+      // nested quotes all appear inside it. Strip the marker and re-parse.
+      const inner = []
       while (index < lines.length) {
-        const item = matcher.exec(lines[index])
-        if (item === null) break
-        items.push(`<li>${inlineMarkdown(item[1])}</li>`)
+        const current = lines[index]
+        if (current.trim() !== '' && !isQuoteLine(current)) break
+        inner.push(current.replace(QUOTE_LINE, ''))
         index++
       }
-      output.push(`<${unordered === null ? 'ol' : 'ul'}>${items.join('')}</${unordered === null ? 'ol' : 'ul'}>`)
+      output.push(`<blockquote>${markdownBlock(inner.join('\n'))}</blockquote>`)
+      continue
+    }
+    const item = listIndentOf(line)
+    if (item !== null) {
+      const list = renderMarkdownList(lines, index, item.indent)
+      output.push(list.html)
+      index = list.next
       continue
     }
     const table = takeTable(lines, index)
@@ -1036,12 +1492,35 @@ function markdownBlock(text) {
       continue
     }
     const paragraph = []
-    while (index < lines.length && lines[index].trim() !== '' && !/^(#{1,6})\s+/.test(lines[index]) && !/^[-*+]\s+/.test(lines[index]) && !/^\d+[.)]\s+/.test(lines[index]) && !isTableRow(lines[index])) paragraph.push(lines[index++])
+    // A paragraph runs until a blank line or the start of another block. A
+    // single newline inside it is a soft break: keeping it as a newline (rather
+    // than joining the lines) preserves the author's line structure, and the
+    // CSS's white-space: pre-wrap renders it without needing <br>.
+    while (index < lines.length) {
+      const current = lines[index]
+      const trimmed = current.trim()
+      if (trimmed === '') break
+      const indent = /^[ \t]*/.exec(current)[0].replace(/\t/g, '  ').length
+      if (paragraph.length > 0 && (isBlockOpener(current) || (indent <= 3 && listIndentOf(current) !== null) || isTableRow(current))) break
+      paragraph.push(current)
+      index++
+    }
+    // A single-line paragraph followed by `===`/`---` is a setext heading. The
+    // paragraph is rewritten into the heading rather than emitted separately.
+    if (paragraph.length === 1) {
+      const level = setextUnderlineOf(lines[index] ?? '')
+      if (level !== null) {
+        headingCounter += 1
+        output.push(`<h${level} id="md-h-${headingCounter}">${inlineMarkdown(paragraph[0].trim())}</h${level}>`)
+        index += 1
+        continue
+      }
+    }
     // A marker-only line such as PowerShell's "+ " diagnostic is neither a
     // list item nor paragraph content under the rules above. Consume it so
     // the parser always makes progress.
-    if (paragraph.length === 0) paragraph.push(lines[index++])
-    output.push(`<p>${paragraph.map(inlineMarkdown).join('<br>')}</p>`)
+    if (paragraph.length === 0) { paragraph.push(lines[index]); index++ }
+    output.push(`<p>${paragraph.map(inlineMarkdown).join('\n')}</p>`)
   }
   return output.join('')
 }
@@ -1051,15 +1530,34 @@ function markdownBlock(text) {
 // re-parsed. Bounded: streaming partial texts churn keys, so evict oldest.
 const markdownCache = new Map()
 const MARKDOWN_CACHE_LIMIT = 5000
+/**
+ * Render markdown into HTML.
+ *
+ * Cached by input text: parsing is pure CPU and repeats for every card on every
+ * canvas rebuild. Bounded — streaming partial texts churn keys, so the oldest
+ * entry is evicted when the cache fills.
+ */
 function renderMarkdown(text) {
   const key = String(text)
   const cached = markdownCache.get(key)
   if (cached !== undefined) return cached
   headingCounter = 0
+  // Splitting on ``` is what makes fenced code a leaf: everything between an
+  // odd and even fence is emitted verbatim, so prose inside a code sample can
+  // never be mistaken for a heading or a list.
   const parts = key.split(/```/)
-  const rendered = parts.map((part, index) => index % 2 === 1
-    ? `<pre><code>${escapeHtml(part.replace(/^\w*\n/, ''))}</code></pre>`
-    : markdownBlock(part)).join('')
+  const rendered = parts.map((part, index) => {
+    if (index % 2 === 0) return markdownBlock(part)
+    // The fence's info string (` ```js `) names the language; it is metadata,
+    // not code, so it is stripped and surfaced as a label instead of being
+    // rendered as the first line of the sample.
+    const newline = part.indexOf('\n')
+    const info = newline === -1 ? part.trim() : part.slice(0, newline).trim()
+    const code = newline === -1 ? '' : part.slice(newline + 1)
+    const language = /^[\w+#.-]{1,16}$/.test(info) ? info : ''
+    const attribute = language === '' ? '' : ` data-lang="${escapeHtml(language)}"`
+    return `<pre${attribute}><code>${escapeHtml(code.replace(/\n$/, ''))}</code></pre>`
+  }).join('')
   if (markdownCache.size >= MARKDOWN_CACHE_LIMIT) markdownCache.delete(markdownCache.keys().next().value)
   markdownCache.set(key, rendered)
   return rendered
@@ -1068,6 +1566,10 @@ function renderMarkdown(text) {
 function overlapsCard(position, other) {
   return position.x < other.x + CARD_WIDTH && position.x + CARD_WIDTH > other.x
     && position.y < other.y + CARD_HEIGHT && position.y + CARD_HEIGHT > other.y
+}
+
+function overlapsHorizontalRange(left, right, otherLeft, otherRight) {
+  return left < otherRight && right > otherLeft
 }
 
 function firstAvailableCardPosition(position, occupied) {
@@ -1136,6 +1638,15 @@ function refreshCardConnectors(cardId) {
     // Data-driven endpoints: the counterpart card may be unmounted (outside
     // the viewport) but its position is still authoritative.
     path.setAttribute('d', connectorPath(fromCard.position, toCard.position))
+    const svg = path.ownerSVGElement
+    if (svg instanceof SVGSVGElement) {
+      const box = connectorLinkBox(fromCard.position, toCard.position)
+      svg.style.left = `${box.left}px`
+      svg.style.top = `${box.top}px`
+      svg.style.width = `${box.width}px`
+      svg.style.height = `${box.height}px`
+      svg.setAttribute('viewBox', `${box.left} ${box.top} ${box.width} ${box.height}`)
+    }
   }
 }
 
@@ -1157,13 +1668,18 @@ function placeConversationCards(cards) {
     const position = state.cardPositions.get(card.id) ?? state.cardPositions.get(card.positionKey)
     return position === undefined ? [] : [[card.id, { x: position.x, y: position.y }]]
   }))
+  // Locked cards are authoritative, but they still occupy canvas space. The
+  // old pass only registered automatically placed cards, so a re-layout could
+  // put a fresh card directly underneath a manually dragged one.
   const occupied = []
   for (const card of cards) {
     const position = saved.get(card.id)
-    if (position !== undefined) {
-      card.position = position
-      continue
-    }
+    if (position === undefined) continue
+    card.position = position
+    occupied.push(position)
+  }
+  for (const card of cards) {
+    if (saved.has(card.id)) continue
     card.position = firstAvailableCardPosition(card.naturalPosition ?? card.position, occupied)
     occupied.push(card.position)
   }
@@ -1171,43 +1687,163 @@ function placeConversationCards(cards) {
 }
 
 function layoutConversationGraph(cards, threads) {
-  const childrenByThread = new Map()
+  // A fork's parent link is Synapse's node id when the parent has been
+  // projected, and DSH's own parent session id otherwise. Lanes must follow
+  // BOTH: a fork linked only by session id used to be treated as a root here,
+  // which parked it in the last lane — far below the conversation it branched
+  // from, with its connector stretched across the whole canvas.
+  const effectiveParentIdOf = thread => {
+    const parentId = thread.parentId ?? null
+    if (parentId !== null && parentId !== undefined) return parentId
+    return sessionThreadIdOf(threads, thread) ?? null
+  }
+  const threadIds = new Set(threads.map(thread => thread.id))
+  const parentByThread = new Map()
   for (const thread of threads) {
-    if (thread.parentId === null) continue
-    const children = childrenByThread.get(thread.parentId) ?? []
-    children.push(thread.id)
-    childrenByThread.set(thread.parentId, children)
+    const parentId = effectiveParentIdOf(thread)
+    parentByThread.set(thread.id, parentId !== null && threadIds.has(parentId) && parentId !== thread.id ? parentId : null)
   }
-  const laneByThread = new Map()
-  const visitThread = threadId => {
-    if (laneByThread.has(threadId)) return
-    laneByThread.set(threadId, laneByThread.size)
-    for (const childId of childrenByThread.get(threadId) ?? []) visitThread(childId)
-  }
-  for (const thread of threads) if (thread.parentId === null) visitThread(thread.id)
-  for (const thread of threads) visitThread(thread.id)
-
   const byId = new Map(cards.map(card => [card.id, card]))
-  const positioned = new Map()
-  const positionFor = (card, visiting = new Set()) => {
-    if (positioned.has(card.id)) return positioned.get(card.id)
-    if (visiting.has(card.id)) return { x: 86, y: 82 + (laneByThread.get(card.dshThreadId) ?? 0) * (CARD_HEIGHT + CARD_GAP_Y) }
+  const xByCard = new Map()
+  const xFor = (card, visiting = new Set()) => {
+    if (xByCard.has(card.id)) return xByCard.get(card.id)
+    if (visiting.has(card.id)) return 86
     visiting.add(card.id)
     const parent = card.parentId === null ? undefined : byId.get(card.parentId)
-    const parentPosition = parent === undefined ? undefined : positionFor(parent, visiting)
+    const x = parent === undefined ? 86 : xFor(parent, visiting) + 365
+    visiting.delete(card.id)
+    xByCard.set(card.id, x)
+    return x
+  }
+  const spanByThread = new Map()
+  for (const card of cards) {
+    const x = xFor(card)
+    const span = spanByThread.get(card.dshThreadId)
+    if (span === undefined) spanByThread.set(card.dshThreadId, { left: x, right: x + CARD_WIDTH })
+    else {
+      span.left = Math.min(span.left, x)
+      span.right = Math.max(span.right, x + CARD_WIDTH)
+    }
+  }
+
+  // Allocate a lane from the top down. A child can only use a lane below its
+  // parent, which keeps the tree legible, but unrelated sessions and branches
+  // may share a lane when their horizontal spans do not intersect. This is
+  // what removes the empty rows caused by the previous depth-first numbering.
+  const depthByThread = new Map()
+  const depthFor = (threadId, visiting = new Set()) => {
+    if (depthByThread.has(threadId)) return depthByThread.get(threadId)
+    if (visiting.has(threadId)) return 0
+    visiting.add(threadId)
+    const parentId = parentByThread.get(threadId)
+    const depth = parentId === null ? 0 : depthFor(parentId, visiting) + 1
+    visiting.delete(threadId)
+    depthByThread.set(threadId, depth)
+    return depth
+  }
+  const orderedThreads = threads
+    .map((thread, index) => ({ thread, index }))
+    .sort((left, right) => {
+      const depthDifference = depthFor(left.thread.id) - depthFor(right.thread.id)
+      if (depthDifference !== 0) return depthDifference
+      const leftSpan = spanByThread.get(left.thread.id)?.left ?? 86
+      const rightSpan = spanByThread.get(right.thread.id)?.left ?? 86
+      return leftSpan - rightSpan || left.index - right.index
+    })
+  const laneByThread = new Map()
+  const spansByLane = []
+  for (const { thread } of orderedThreads) {
+    const parentId = parentByThread.get(thread.id)
+    const firstLane = parentId === null ? 0 : (laneByThread.get(parentId) ?? 0) + 1
+    const span = spanByThread.get(thread.id) ?? { left: 86, right: 86 + CARD_WIDTH }
+    let lane = firstLane
+    while (spansByLane[lane]?.some(other => overlapsHorizontalRange(span.left, span.right, other.left, other.right))) lane += 1
+    laneByThread.set(thread.id, lane)
+    ;(spansByLane[lane] ??= []).push(span)
+  }
+
+  for (const card of cards) {
     const position = {
-      x: parentPosition === undefined ? 86 : parentPosition.x + 365,
+      x: xFor(card),
       y: 82 + (laneByThread.get(card.dshThreadId) ?? 0) * (CARD_HEIGHT + CARD_GAP_Y),
     }
-    visiting.delete(card.id)
-    positioned.set(card.id, position)
-    return position
-  }
-  for (const card of cards) {
-    card.naturalPosition = positionFor(card)
-    if (!card.positionLocked) card.position = card.naturalPosition
+    card.naturalPosition = position
+    if (!card.positionLocked) card.position = position
   }
   return placeConversationCards(cards)
+}
+
+function isSessionLabelQuestion(text) {
+  if (typeof text !== 'string') return false
+  const trimmed = text.trim()
+  if (trimmed === '' || trimmed === '会话' || trimmed === 'DSH 会话') return true
+  if (trimmed === '当前会话' || trimmed === '等待用户提问') return true
+  return trimmed.endsWith('分支')
+}
+
+/** Whether a card title is a question the human actually asked. */
+function isHumanCardQuestion(text) {
+  if (typeof text !== 'string') return false
+  const trimmed = text.trim()
+  if (trimmed === '') return false
+  if (isSessionLabelQuestion(trimmed)) return false
+  return !isInjectedCardText(trimmed)
+}
+
+function isInjectedCardText(text) {
+  const trimmed = text.trimStart()
+  if (trimmed.startsWith('Current runtime context. This snapshot supersedes earlier runtime-context snapshots.')) return true
+  if (trimmed.startsWith('This is an automatically generated checkpoint')) return true
+  if (trimmed.startsWith('The approval policy changed from')) return true
+  if (trimmed.startsWith('You are repeating the exact same tool call')) return true
+  if (trimmed.startsWith('## Main conversation context')) return true
+  if (trimmed.startsWith('Background subagent')) return true
+  if (/^background job /i.test(trimmed)) return true
+  if (/^Cordis (?:run|update)\b/.test(trimmed)) return true
+  if (trimmed.startsWith('The user stopped Cordis') || trimmed.startsWith('The user manually ran Cordis')) return true
+  return /^<(system-reminder|system|context|environment|reminder|goal_round|goal_complete)\b[^>]*>/i.test(trimmed)
+}
+
+function firstUserQuestion(thread) {
+  for (const turn of thread?.turns ?? []) {
+    if (isHumanCardQuestion(turn?.question)) return turn.question
+  }
+  return null
+}
+
+/**
+ * A turn's custom title, set by renaming the card. It lives on the turn itself
+ * (`turn.title`) so reprojection and reloads keep it; an empty or missing value
+ * means the card falls back to the auto-derived question.
+ */
+function cardTitleOf(storedTurn) {
+  if (storedTurn === null || typeof storedTurn !== 'object') return null
+  const title = typeof storedTurn.title === 'string' ? storedTurn.title.trim() : ''
+  return title === '' ? null : title
+}
+
+function cardQuestionOf(thread, storedTurn, inflightQuestion) {
+  const stored = typeof storedTurn?.question === 'string' ? storedTurn.question : ''
+  if (isHumanCardQuestion(stored)) return stored
+  if (isHumanCardQuestion(inflightQuestion)) return inflightQuestion
+  return '等待用户提问'
+}
+
+/**
+ * Whether an empty fork still counts as "just created".
+ *
+ * The canvas keeps a placeholder card for every linked branch at any age, so
+ * this freshness window no longer gates visibility — it answers two narrower
+ * questions: whether a blank placeholder is titled 等待用户提问 (still waiting
+ * on its first prompt) or 空分支, and whether `keepLiveCanvasThreads` should
+ * survive a workspace refetch that raced the fork's creation and omitted it.
+ * Older blank forks are authoritative on the server, so the fetch wins there.
+ */
+function isFreshBlankFork(thread) {
+  if (thread?.parentId == null) return false
+  const created = Date.parse(thread.createdAt ?? '')
+  if (!Number.isFinite(created)) return true
+  return Date.now() - created < 15 * 60 * 1000
 }
 
 function conversationCards(threads) {
@@ -1224,7 +1860,8 @@ function conversationCards(threads) {
     // text (checkpoints, runtime context) is not a question anyone asked, so
     // it never reaches the canvas. The last card is kept when a real prompt is
     // still in flight: until DSH commits it, that card is the pending question.
-    const stored = turnsFor(thread).filter((storedTurn, turnIndex, list) => {
+    const allTurns = turnsFor(thread)
+    const stored = allTurns.filter((storedTurn, turnIndex, list) => {
       if (isHumanCardQuestion(storedTurn?.question)) return true
       return turnIndex === list.length - 1 && isHumanCardQuestion(inflightQuestion)
     })
@@ -1248,22 +1885,28 @@ function conversationCards(threads) {
         naturalPosition,
         position: positionLocked ? savedPosition : naturalPosition,
         positionLocked,
-        question: storedTurn.question ?? '',
-        answer: storedTurn.answer === null || storedTurn.answer === undefined ? null : { kind: 'assistant', text: storedTurn.answer, sourceSeq: storedTurn.answerSeq, at: storedTurn.at },
+        question: cardTitleOf(storedTurn) ?? cardQuestionOf(thread, storedTurn, turnIndex === stored.length - 1 ? inflightQuestion : undefined),
+        customTitle: cardTitleOf(storedTurn),
+        // The rename API addresses a turn by seq, or by its RAW index in
+        // thread.turns — not by the filtered card index used in `id`.
+        cardKey: Number.isSafeInteger(storedTurn.seq) ? String(storedTurn.seq) : `i${allTurns.indexOf(storedTurn)}`,
+        answer: storedTurn.answer === null || storedTurn.answer === undefined ? null : { kind: 'assistant', text: storedTurn.answer, sourceSeq: storedTurn.answerSeq, at: storedTurn.at, pending: storedTurn.pending === true },
         error: storedTurn.error === null || storedTurn.error === undefined ? null : { kind: 'error', text: storedTurn.error, at: storedTurn.at },
         processCount: storedTurn.processCount ?? 0,
       })
     })
-    const liveReply = state.liveReplies.get(thread.dshSessionId)
     const latestTurn = turns.at(-1)
-    if (liveReply?.running && latestTurn !== undefined && (latestTurn.answer === null || latestTurn.answer.pending === true)) latestTurn.answer = { kind: 'assistant', text: liveReply.text, pending: true, at: new Date().toISOString() }
+    if (liveReply !== undefined && typeof liveReply.text === 'string' && liveReply.text !== '' && latestTurn !== undefined && (latestTurn.answer === null || latestTurn.answer.pending === true)) latestTurn.answer = { kind: 'assistant', text: liveReply.text, pending: liveReply.running === true, at: new Date().toISOString() }
     if (turns.length === 0) {
-      // A brand-new fork is blank for the moments before its first message
-      // lands, and it must stay visible so the user can watch it run. A blank
-      // session with nothing to show any more (an abandoned branch, or one
-      // DSH created and never used) would otherwise litter the map with
-      // 等待用户提问 cards, so only fresh forks keep their placeholder.
-      if (!isFreshBlankFork(thread) && !isHumanCardQuestion(inflightQuestion)) continue
+      // A branch is part of the family tree even before its first message:
+      // the fork exists in DSH's session list, so hiding it would make the
+      // map show a lone chain where the user actually created a tree. Blank
+      // branches keep a placeholder card at any age — the canvas is already
+      // scoped to the current family, so this never pulls in unrelated
+      // clutter. Only a blank session with no branch link at all (and no
+      // question in flight) stays off the canvas.
+      const linked = thread.parentId != null || (typeof thread.sourceParentSessionId === 'string' && thread.sourceParentSessionId !== '')
+      if (!linked && !isHumanCardQuestion(inflightQuestion)) continue
       const id = `${thread.id}:turn:empty`
       const positionKey = `${thread.id}:turn-index:0`
       const naturalPosition = { x: 86, y: 82 }
@@ -1280,10 +1923,11 @@ function conversationCards(threads) {
       naturalPosition,
       position: positionLocked ? savedPosition : naturalPosition,
       positionLocked,
-      question: cardQuestionOf(thread, null, inflightQuestion),
+      question: isFreshBlankFork(thread) || isHumanCardQuestion(inflightQuestion) ? cardQuestionOf(thread, null, inflightQuestion) : '空分支',
       answer: null,
       error: null,
       processCount: 0,
+      blank: true,
       })
     }
     turns.at(-1).canContinue = true
@@ -1294,20 +1938,124 @@ function conversationCards(threads) {
     const siblings = cardsByThread.get(card.dshThreadId)
     if (card.turnIndex > 0) card.parentId = siblings[card.turnIndex - 1].id
     else {
-      const parentCards = cardsByThread.get(card.sourceParentId)
       const sourceThread = threads.find(thread => thread.id === card.dshThreadId)
-      const firstChildQuestion = siblings?.[0]
-      const seedLength = sourceThread?.sourceSeedLength ?? firstChildQuestion?.sourceSeq
-      // A fork inherits every parent event before DSH's durable seed boundary.
-      // The latest parent question below that boundary is the exact Turn where
-      // this child was born. Canvas coordinates never participate in lineage.
-      const inheritedTurn = Number.isSafeInteger(seedLength)
-        ? parentCards?.filter(candidate => Number.isInteger(candidate.sourceSeq) && candidate.sourceSeq < seedLength).at(-1)
-        : undefined
-      card.parentId = state.branchAnchors.get(card.dshThreadId) ?? inheritedTurn?.id ?? null
+      // Synapse's own parent node, then DSH's recorded parent SESSION. The
+      // second link is what keeps a fork attached when its parent thread has
+      // not been projected into this workspace yet (a restored branch, or one
+      // whose parent is still syncing) — otherwise it would fall through to a
+      // null parent and pile up on the canvas origin.
+      const parentCards = cardsByThread.get(card.sourceParentId) ?? cardsByThread.get(sessionThreadIdOf(threads, sourceThread))
+      const anchored = branchAnchorFor(sourceThread, parentCards) ?? inheritedTurnFor(sourceThread, parentCards, siblings)
+      // A fork cut across different sequence spaces (an old DSH fork whose
+      // child re-counts from its own origin) leaves no comparable seq, and no
+      // guess is honest. Attach the branch to the parent's first card so it at
+      // least hangs beside its conversation instead of collapsing onto the
+      // canvas origin where it overlaps the parent chain.
+      card.parentId = anchored ?? (parentCards === undefined || parentCards.length === 0 ? null : parentCards[0].id)
+      card.anchorInferred = anchored === undefined && card.parentId !== null
     }
   }
   return layoutConversationGraph(cards, threads)
+}
+
+/**
+ * The Synapse thread id of a session, for linking a fork through DSH's own
+ * recorded parent session when Synapse's parent node is missing.
+ */
+function sessionThreadIdOf(threads, sourceThread) {
+  const sessionId = sourceThread?.sourceParentSessionId
+  if (typeof sessionId !== 'string' || sessionId === '') return undefined
+  const parent = threads.find(thread => thread.dshSessionId === sessionId)
+  return parent === undefined ? undefined : parent.id
+}
+
+/**
+ * Resolve where a branch card attaches to its parent conversation.
+ *
+ * The anchor is the exact turn the user branched from, persisted on the server
+ * (`anchorCardId`) or remembered in this browser (`branchAnchors`). It wins
+ * over any sequence arithmetic because a fork cut mid-turn leaves several
+ * parent turns that all look like valid attachment points.
+ * @param sourceThread - the branch's own thread, when it is in the graph.
+ * @param parentCards - the parent thread's cards, keyed by thread id lookups.
+ * @returns the parent card id, or undefined when no anchor applies.
+ */
+function branchAnchorFor(sourceThread, parentCards) {
+  if (sourceThread === undefined || parentCards === undefined) return undefined
+  const persisted = sourceThread.anchorCardId
+  if (typeof persisted === 'string' && persisted !== '' && parentCards.some(candidate => candidate.id === persisted)) return persisted
+  const remembered = state.branchAnchors.get(sourceThread.id)
+  if (typeof remembered === 'string' && remembered !== '' && parentCards.some(candidate => candidate.id === remembered)) return remembered
+  // A browser anchor can also name the session rather than the thread.
+  if (sourceThread.dshSessionId !== null) {
+    const bySession = state.branchAnchors.get(sourceThread.dshSessionId)
+    if (typeof bySession === 'string' && bySession !== '' && parentCards.some(candidate => candidate.id === bySession)) return bySession
+  }
+  return undefined
+}
+
+/**
+ * Fall back to sequence arithmetic when no anchor was recorded.
+ *
+ * Two signals, in order of trust:
+ *
+ * 1. DSH's durable fork cut (`sourceSeedLength`): the branch point is the last
+ *    parent turn that ends at or before that boundary. Zero is a legitimate
+ *    boundary, so the test must be an explicit integer check rather than a
+ *    truthiness check — treating 0 as "no seed" is what used to drop these
+ *    branches to the canvas origin, where they piled up on top of the parent
+ *    chain instead of sitting beside it.
+ * 2. The inherited prefix: a fork replays its parent's history, so a parent
+ *    turn whose sequence also appears in the child is part of what the branch
+ *    inherited. The last such turn is where the branch left. This rescues the
+ *    many old forks whose recorded seed is 0 or absent even though their first
+ *    turn is a copy of a parent turn.
+ *
+ * @param sourceThread - the branch's own thread.
+ * @param parentCards - the parent thread's cards.
+ * @param siblings - the branch's own cards.
+ * @returns the parent card id, or undefined when the cut cannot be placed.
+ */
+function inheritedTurnFor(sourceThread, parentCards, siblings) {
+  if (parentCards === undefined || parentCards.length === 0) return undefined
+  const seed = sourceThread?.sourceSeedLength
+  if (Number.isSafeInteger(seed) && seed >= 0) {
+    const endedAtOrBefore = parentCards.filter(candidate => {
+      const end = Number.isSafeInteger(candidate.answerSeq) ? candidate.answerSeq : candidate.sourceSeq
+      return Number.isSafeInteger(end) && end <= seed
+    })
+    const turn = endedAtOrBefore.at(-1)
+    if (turn !== undefined) return turn.id
+    // The seed claims this branch inherited nothing. That is trustworthy only
+    // when the child's numbering continues the parent's (its first turn comes
+    // after every parent turn); a child numbered *below* its parent's first
+    // turn re-counts from its own origin, so its recorded 0 is noise and the
+    // prefix guess below is the only signal left.
+    const earliest = Math.min(...parentCards
+      .map(candidate => (Number.isSafeInteger(candidate.sourceSeq) ? candidate.sourceSeq : undefined))
+      .filter(seq => seq !== undefined))
+    const childSeqs = (siblings ?? []).map(sibling => (Number.isSafeInteger(sibling.sourceSeq) ? sibling.sourceSeq : undefined)).filter(seq => seq !== undefined)
+    const continuesParent = childSeqs.length === 0 || Math.min(...childSeqs) > earliest
+    const parentEnds = parentCards.map(candidate => (Number.isSafeInteger(candidate.answerSeq) ? candidate.answerSeq : candidate.sourceSeq)).filter(seq => Number.isSafeInteger(seq))
+    if (continuesParent || (parentEnds.length > 0 && seed > Math.max(...parentEnds))) return undefined
+  }
+  // A child with no turns of its own inherited nothing we can compare, so leave
+  // it unanchored rather than guessing at the parent's first turn.
+  if (siblings === undefined || siblings.length === 0) return undefined
+  // The child's first own turn begins right after the inherited prefix, so
+  // every parent turn that starts at or before it is part of what this branch
+  // copied. The last such turn is where the branch left. This covers both a
+  // child that replays a parent turn verbatim (equal seq) and one whose seq
+  // continues the same numbering (higher seq). A fork that re-counts from its
+  // own origin shares neither, and correctly matches nothing.
+  const childSeqs = siblings
+    .map(sibling => (Number.isSafeInteger(sibling.sourceSeq) ? sibling.sourceSeq : undefined))
+    .filter(seq => seq !== undefined)
+  if (childSeqs.length === 0) return undefined
+  const childStart = Math.min(...childSeqs)
+  const inherited = parentCards.filter(candidate => Number.isSafeInteger(candidate.sourceSeq) && candidate.sourceSeq <= childStart)
+  const turn = inherited.at(-1)
+  return turn === undefined ? undefined : turn.id
 }
 
 function conversationGraphView(cards, collapsedCardIds = state.collapsedCardIds) {
@@ -1418,18 +2166,44 @@ function revealConversationThread(cards, threadId) {
   return changed
 }
 
+/**
+ * World-space box for one connector, including bezier handles.
+ *
+ * Each link is its own absolutely positioned SVG, the same way cards are
+ * absolutely positioned. A single viewport-sized SVG used to clip any path
+ * that left the first screen of the canvas — a just-created branch often
+ * sits in a new lane, so its line vanished until a later layout.
+ */
+function connectorLinkBox(fromPosition, toPosition) {
+  const fromX = fromPosition.x + CARD_WIDTH
+  const fromY = fromPosition.y + CARD_HEIGHT / 2
+  const toX = toPosition.x
+  const toY = toPosition.y + CARD_HEIGHT / 2
+  const bend = Math.min(110, Math.max(36, Math.abs(toX - fromX) * .2))
+  const left = Math.min(fromX, toX, fromX + bend, toX - bend) - 8
+  const top = Math.min(fromY, toY) - 8
+  const width = Math.max(1, Math.max(fromX, toX, fromX + bend, toX - bend) - left + 8)
+  const height = Math.max(1, Math.max(fromY, toY) - top + 8)
+  return { left, top, width, height }
+}
+
+function connectorLinkSvg(fromCard, toCard, extraClass = '') {
+  const box = connectorLinkBox(fromCard.position, toCard.position)
+  const klass = extraClass.trim()
+  return `<svg class="connector-link" data-from="${escapeHtml(fromCard.id)}" data-to="${escapeHtml(toCard.id)}" style="left:${box.left}px;top:${box.top}px;width:${box.width}px;height:${box.height}px" viewBox="${box.left} ${box.top} ${box.width} ${box.height}" overflow="visible"><path class="${klass}" data-from="${escapeHtml(fromCard.id)}" data-to="${escapeHtml(toCard.id)}" d="${connectorPath(fromCard.position, toCard.position)}"></path></svg>`
+}
+
 function canvasConnectors(cards) {
   const index = new Map(cards.map(card => [card.id, card]))
-  const links = cards.map(card => {
+  const links = []
+  for (const card of cards) {
     const parent = card.parentId === null ? null : index.get(card.parentId)
-    if (parent === undefined || parent === null) return ''
-    const active = card.dshThreadId === state.activeId && parent.dshThreadId === state.activeId ? ' active-connector' : ''
-    return `<path class="${active.trim()}" data-from="${escapeHtml(parent.id)}" data-to="${escapeHtml(card.id)}" d="${connectorPath(parent.position, card.position)}"></path>`
-  })
-  const placement = draftPlacement(cards)
-  if (placement !== null) {
-    links.push(`<path class="draft-connector" data-from="${escapeHtml(placement.parent.id)}" data-to="draft" d="${connectorPath(placement.parent.position, placement.position)}"></path>`)
+    if (parent === undefined || parent === null) continue
+    const active = card.dshThreadId === state.activeId && parent.dshThreadId === state.activeId ? 'active-connector' : ''
+    links.push(connectorLinkSvg(parent, card, active))
   }
+  const placement = draftPlacement(cards)
+  if (placement !== null) links.push(connectorLinkSvg(placement.parent, { id: 'draft', position: placement.position }, 'draft-connector'))
   return links.join('')
 }
 
@@ -1447,14 +2221,24 @@ function conversationCard(card, graph) {
   const status = sessionStatusFor(state.workspace?.threads.find(item => item.id === card.dshThreadId))
   const resolvedState = cardState(card, status)
   const branchButton = branchSeq === null ? '' : `<button class="graph-branch-button" data-action="open-branch" data-thread="${card.dshThreadId}" data-card="${escapeHtml(card.id)}" data-seq="${branchSeq}" aria-label="在新对话中分支" title="在新对话中分支"><svg aria-hidden="true" viewBox="0 0 16 16"><path fill-rule="evenodd" clip-rule="evenodd" d="M13.0762 1.37207C14.0846 1.37228 14.9021 2.19077 14.9023 3.19922C14.9022 4.20772 14.0847 5.02518 13.0762 5.02539C12.2967 5.02539 11.6325 4.53691 11.3701 3.84961H4.35547C4.79397 4.26458 5.15861 4.7644 5.41699 5.33496L7.10645 9.06738C7.88526 10.7875 9.55104 11.9228 11.4189 12.0371C11.7085 11.4109 12.3411 10.9756 13.0762 10.9756C14.0843 10.9759 14.9023 11.7936 14.9023 12.8018C14.9023 13.81 14.0843 14.6277 13.0762 14.6279C12.2534 14.6279 11.5574 14.0832 11.3291 13.335C8.9868 13.1879 6.89981 11.7612 5.92285 9.60352L4.23242 5.87109C3.67503 4.64033 2.44878 3.84961 1.09766 3.84961V2.54883C1.10665 2.54883 1.11601 2.54975 1.125 2.5498L11.3701 2.54883C11.6326 1.86151 12.2969 1.37207 13.0762 1.37207ZM13.0762 12.2764C12.7858 12.2764 12.5508 12.5114 12.5508 12.8018C12.5508 13.0921 12.7858 13.3281 13.0762 13.3281C13.3664 13.3279 13.6025 13.092 13.6025 12.8018C13.6025 12.5115 13.3664 12.2766 13.0762 12.2764ZM13.0762 2.67285C12.7855 2.67285 12.55 2.90861 12.5498 3.19922C12.5499 3.48987 12.7855 3.72559 13.0762 3.72559C13.3667 3.72538 13.6024 3.48975 13.6025 3.19922C13.6023 2.90874 13.3666 2.67306 13.0762 2.67285Z" fill="currentColor"/></svg></button>`
-  return `<article class="thread-card ${selected} card-${resolvedState}" data-card-id="${escapeHtml(card.id)}" data-position-key="${escapeHtml(card.positionKey)}" data-thread="${card.dshThreadId}" data-state="${resolvedState}" style="left:${card.position.x}px;top:${card.position.y}px;--thread-color:#3478f6">
+  return `<article class="thread-card ${selected}${card.blank === true ? ' card-blank' : ''} card-${resolvedState}" data-card-id="${escapeHtml(card.id)}" data-position-key="${escapeHtml(card.positionKey)}" data-thread="${card.dshThreadId}" data-state="${resolvedState}" style="left:${card.position.x}px;top:${card.position.y}px;--thread-color:#3478f6">
     <button class="node-handle" data-drag-card="${card.id}" aria-label="拖动 ${escapeHtml(card.question)}" title="拖动卡片"></button>
     ${continueButton}${foldButton}${branchButton}
-    <div class="thread-card-head"><span class="topic-dot"></span><strong class="thread-title">${escapeHtml(card.question)}</strong></div>
-    <div class="thread-meta"><span>${source}</span><span>第 ${card.turnIndex + 1} 轮</span>${cardStateBadge(card, status)}${card.processCount > 0 ? `<span class="card-process-count">工具 ${card.processCount}</span>` : ''}</div>
-    <div class="thread-answer">${card.answer === null ? (card.error === null ? '<p class="thread-answer-empty">等待助手回复</p>' : '') : card.answer.pending && card.answer.text === '' ? '<p class="thread-answer-pending">正在回复</p>' : `${renderMarkdown(card.answer.text)}${card.answer.pending ? '<p class="thread-answer-pending">正在回复</p>' : ''}`}${card.error === null ? '' : `<p class="thread-answer-error" title="${escapeHtml(card.error.text)}">本轮失败：${escapeHtml(card.error.text)}</p>`}</div>
+    <div class="thread-card-head"><span class="topic-dot"></span>${state.renamingCardId === card.id ? cardRenameForm(card, 'thread-title-input') : `<strong class="thread-title">${escapeHtml(card.question)}</strong>${card.blank === true ? '' : cardRenameButton(card)}`}</div>
+    <div class="thread-meta"><span>${source}</span><span>第 ${card.turnIndex + 1} 轮</span>${card.blank === true ? '' : cardStateBadge(card, status)}${card.anchorInferred === true ? '<span class="card-anchor-inferred" title="这个分支的分叉点已无法还原，暂时挂在主会话开头">分叉点未知</span>' : ''}${card.processCount > 0 ? `<span class="card-process-count">工具 ${card.processCount}</span>` : ''}</div>
+    <div class="thread-answer">${card.answer === null ? (card.error === null ? (card.blank === true ? '<p class="thread-answer-empty">这个分支还没有消息</p>' : '<p class="thread-answer-empty">等待助手回复</p>') : '') : card.answer.pending && card.answer.text === '' ? '<p class="thread-answer-pending">正在回复</p>' : `${renderMarkdown(card.answer.text)}${card.answer.pending ? '<p class="thread-answer-pending">正在回复</p>' : ''}`}${card.error === null ? '' : `<p class="thread-answer-error" title="${escapeHtml(card.error.text)}">本轮失败：${escapeHtml(card.error.text)}</p>`}</div>
     <footer><button data-action="watch-turn" data-thread="${card.dshThreadId}" data-card="${escapeHtml(card.id)}" title="详情" aria-label="详情"><svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><path d="M2 8.5 8 2.5l6 6V13.5a.5.5 0 0 1-.5.5h-11a.5.5 0 0 1-.5-.5Z"/><path d="M6.2 14v-3.6a1.8 1.8 0 0 1 3.6 0V14" /></svg>详情</button><button data-action="open-dsh" data-thread="${card.dshThreadId}" data-seq="${Number.isInteger(card.sourceSeq) ? card.sourceSeq : ''}" title="在 DSH 中打开" aria-label="在 DSH 中打开"><svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3.5H4.5A1.5 1.5 0 0 0 3 5v6.5A1.5 1.5 0 0 0 4.5 13H11a1.5 1.5 0 0 0 1.5-1.5V9"/><path d="M9.5 3.5h3v3M12.4 3.6 7.5 8.5"/></svg>DSH</button>${card.turnIndex === 0 && card.sourceParentId !== null ? `<button data-action="remove-branch" data-thread="${card.dshThreadId}" title="删除这个分支" aria-label="删除这个分支"><svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 4.5h9M6 4.5V3.4a.9.9 0 0 1 .9-.9h2.2a.9.9 0 0 1 .9.9V4.5M5.5 6.2v6.3a.8.8 0 0 0 .8.8h3.4a.8.8 0 0 0 .8-.8V6.2"/></svg>删除</button>` : ''}</footer>
   </article>`
+}
+
+/** Pencil entry shown on hover next to a card title; starts an in-place rename. */
+function cardRenameButton(card) {
+  return `<button class="thread-rename-button" type="button" data-action="rename-card" data-card="${escapeHtml(card.id)}" aria-label="重命名卡片标题" title="重命名卡片标题"><svg aria-hidden="true" viewBox="0 0 16 16"><path d="M11.9 2.9 13.1 4.1 5.4 11.8 3.6 12.4 4.2 10.6Z"/><path d="m10.7 4.1 1.2 1.2"/></svg></button>`
+}
+
+/** The editing state of a card title: Enter commits, Escape cancels, blur commits. */
+function cardRenameForm(card, inputClass) {
+  return `<form class="card-rename-form" data-rename="${escapeHtml(card.id)}"><input class="${inputClass}" data-rename-input="${escapeHtml(card.id)}" maxlength="120" value="${escapeHtml(card.question)}" aria-label="卡片标题"></form>`
 }
 
 function draftActions(draft) {
@@ -1523,7 +2307,14 @@ function draftPlacement(cards) {
     ? cards.filter(card => card.dshThreadId === draft.parentId).at(-1)
     : cards.find(card => card.id === draft.anchorId)
   if (parent === undefined) return null
-  return { parent, position: firstAvailableCardPosition({ x: parent.position.x + 365, y: parent.position.y }, cards.map(card => card.position)) }
+  // A continue card lands on the parent's own lane, one step to the right. A
+  // branch card gets its own lane BELOW the parent (see
+  // layoutConversationGraph), so place its draft there too — otherwise the
+  // card visibly jumps down the moment the draft is submitted.
+  const natural = draft.kind === 'branch'
+    ? { x: parent.position.x + 365, y: parent.position.y + CARD_HEIGHT + CARD_GAP_Y }
+    : { x: parent.position.x + 365, y: parent.position.y }
+  return { parent, position: firstAvailableCardPosition(natural, cards.map(card => card.position)) }
 }
 
 function draftCard(cards) {
@@ -1558,6 +2349,16 @@ function visibleCardIds(cards) {
   const bottom = (bounds.height - state.canvasCamera.y + VIEWPORT_MARGIN) / state.zoom
   const visible = new Set()
   for (const card of cards) {
+    const thread = state.workspace?.threads.find(item => item.id === card.dshThreadId)
+    // A pending reply holds its card mounted even off-screen. The optimistic
+    // branch node keys its pending reply by THREAD id (it has no session yet),
+    // so both keyings must count — otherwise the just-created branch is culled
+    // the moment it lands outside the viewport.
+    const held = thread !== undefined && (state.pendingReplies.has(thread.dshSessionId) || state.pendingReplies.has(thread.id))
+    if (held) {
+      visible.add(card.id)
+      continue
+    }
     const { x, y } = card.position
     if (x + CARD_WIDTH < left || x > right || y + CARD_HEIGHT < top || y > bottom) continue
     visible.add(card.id)
@@ -1593,8 +2394,10 @@ function syncCanvasViewport() {
 }
 
 function renderCanvas() {
+  // No empty state: the canvas itself is the home screen. A workspace with no
+  // conversations simply renders an empty, pannable canvas; the sidebar's
+  // 新会话 button is the entry point.
   const threads = visibleThreads()
-  if (threads.length === 0 && state.draft?.kind !== 'new') return `<section class="empty-canvas"><strong>当前工作目录还没有 DSH 对话。</strong><p>点击新会话，在画布中输入第一条消息。</p><div><button class="primary" type="button" data-action="create-session">新建会话</button></div></section>`
   const allCards = conversationCards(threads)
   const graph = conversationGraphView(allCards)
   const cards = graph.cards
@@ -1618,7 +2421,7 @@ function renderCanvas() {
   const inspector = state.inspectorCardId === null ? '' : renderCardInspector(state.canvasCardsById.get(state.inspectorCardId))
   const viewClass = `canvas-view${inspector !== '' && state.inspectorExpanded ? ' inspector-expanded' : ''}`
   const viewStyle = inspector === '' || state.inspectorExpanded ? '' : ` style="--inspector-width:${clampInspectorWidth(state.inspectorWidth)}px"`
-  return `<section class="${viewClass}"${viewStyle}><div class="canvas-viewport"><div class="canvas-content" style="transform:translate(${state.canvasCamera.x}px, ${state.canvasCamera.y}px) scale(${state.zoom})"><svg class="connectors">${canvasConnectors(cards)}</svg><div class="cards-layer">${mounted.map(card => conversationCard(card, graph)).join('')}${draftCard(cards)}</div></div></div>${inspector}</section>`
+  return `<section class="${viewClass}"${viewStyle}><div class="canvas-viewport"><div class="canvas-content" style="transform:translate(${state.canvasCamera.x}px, ${state.canvasCamera.y}px) scale(${state.zoom})"><div class="connectors">${canvasConnectors(cards)}</div><div class="cards-layer">${mounted.map(card => conversationCard(card, graph)).join('')}${draftCard(cards)}</div></div></div>${inspector}</section>`
 }
 
 function processRecords(process, messageId) {
@@ -1637,6 +2440,23 @@ function processRecords(process, messageId) {
 }
 
 /**
+ * The turn's last assistant markdown.
+ *
+ * A turn can emit several assistant steps (a preamble, then the real reply).
+ * The drawer shows only the last non-empty one; earlier steps stay in the
+ * process log / 详情 pane. An empty fallback is the card summary, which is
+ * already the projection's final reply.
+ */
+function lastAssistantText(steps, fallback) {
+  const texts = []
+  for (const step of steps ?? []) {
+    if (step?.kind === 'assistant' && typeof step.text === 'string' && step.text !== '') texts.push(step.text)
+  }
+  if (texts.length > 0) return texts[texts.length - 1]
+  return typeof fallback === 'string' ? fallback : ''
+}
+
+/**
  * The reply body of one inspector card, resolved from its on-demand detail.
  *
  * A settled card keeps its own text even while a LATER turn of the same
@@ -1645,16 +2465,14 @@ function processRecords(process, messageId) {
  * failed (or has not landed yet) the stored card summary carries the card —
  * the pane degrades, it never breaks.
  *
- * @returns the answer text plus whether the reply is still pending.
+ * @returns the last output markdown plus whether the reply is still pending.
  */
 function inspectorReply(card) {
   const thread = state.workspace?.threads.find(item => item.id === card.dshThreadId)
   const detail = thread === undefined ? null : historyForCard(thread, card.id)
   const steps = detail?.steps ?? []
   const pending = card.answer?.pending === true
-  const answerText = steps.length > 0
-    ? steps.filter(step => step.kind === 'assistant').map(step => step.text).join('\n\n')
-    : (card.answer?.text ?? '')
+  const answerText = lastAssistantText(steps, card.answer?.text ?? '')
   return { pending, answerText }
 }
 
@@ -1701,20 +2519,16 @@ function renderCardInspector(card) {
   // Full text is read back from the DSH session on open; until it arrives the
   // card summary renders, which is what the canvas shows anyway.
   const detail = historyForCard(thread, card.id)
-  const steps = detail?.steps ?? []
-  const process = detail?.process ?? []
-  const loading = detail === null && Number.isSafeInteger(card.sourceSeq)
-  const answerText = steps.length > 0
-    ? steps.filter(step => step.kind === 'assistant').map(step => step.text).join('\n\n')
-    : card.answer?.text ?? null
+  const { pending, answerText } = inspectorReply(card)
+  // The drawer shows the turn's last output markdown only. Intermediate
+  // assistant steps stay out of this surface; 详情 opens the live turn flow.
   const errorText = card.error === null
     ? null
-    : steps.filter(step => step.kind === 'error').map(step => step.text).join('\n\n') || card.error.text
-  const answer = answerText === null || answerText === ''
-    ? errorText === null ? `<p class="card-inspector-pending">${loading ? '正在读取完整内容…' : '等待助手回复'}</p>` : ''
-    : `<article class="card-inspector-answer">${renderMarkdown(answerText)}${card.answer?.pending ? '<p class="card-inspector-pending">正在回复</p>' : ''}</article>`
+    : (detail?.steps ?? []).filter(step => step.kind === 'error').map(step => step.text).join('\n\n') || card.error.text
+  const answer = answerText === ''
+    ? errorText === null ? '<p class="card-inspector-pending">正在回复</p>' : ''
+    : `<article class="card-inspector-answer">${renderMarkdown(answerText)}${pending ? '<p class="card-inspector-pending">正在回复</p>' : ''}</article>`
   const error = errorText === null ? '' : `<section class="card-inspector-error" role="alert"><strong>本轮未完成</strong><p>${escapeHtml(errorText)}</p></section>`
-  const processRecordsHtml = process.length === 0 ? '' : processRecords(process, `${thread.id}:${card.id}:inspector`)
   const continueAction = card.canContinue === true ? `<button type="button" data-action="open-continue" data-thread="${thread.id}" data-card="${escapeHtml(card.id)}"><svg aria-hidden="true" viewBox="0 0 16 16"><path d="M2.5 3.5h11v7h-6l-3.5 2.5v-2.5h-1.5Z"/><path d="M8 5.5v3M6.5 7h3"/></svg>继续追问</button>` : ''
   const branchSeq = Number.isSafeInteger(card.answerSeq) ? card.answerSeq : card.answer?.sourceSeq
   const branch = Number.isInteger(branchSeq)
@@ -1722,11 +2536,12 @@ function renderCardInspector(card) {
     : ''
   const openDshAction = `<button class="primary" type="button" data-action="open-dsh" data-thread="${thread.id}" data-seq="${Number.isInteger(branchSeq) ? branchSeq : ''}"><svg aria-hidden="true" viewBox="0 0 16 16"><path d="M7 3.5H4.5A1.5 1.5 0 0 0 3 5v6.5A1.5 1.5 0 0 0 4.5 13H11a1.5 1.5 0 0 0 1.5-1.5V9"/><path d="M9.5 3.5h3v3M12.4 3.6 7.5 8.5"/></svg>在 DSH 中打开</button>`
   const removeBranchAction = thread.parentId === null ? '' : `<button type="button" data-action="remove-branch" data-thread="${thread.id}">删除分支</button>`
-  const question = detail?.question ?? card.question
+  const question = card.customTitle ?? detail?.question ?? card.question
   const headings = typeof answerText === 'string' && answerText !== '' ? markdownHeadings(answerText) : []
   const noteSave = state.inspectorNoteSave?.cardId === card.id ? state.inspectorNoteSave.status : 'idle'
   const noteBusy = noteSave === 'saving' || answerText === null || answerText === '' || card.answer?.pending === true
   const noteLabel = noteSave === 'saving' ? '正在添加' : noteSave === 'saved' ? '已添加到笔记' : noteSave === 'error' ? '添加失败' : '添加到笔记'
+  const renameAction = card.blank === true ? '' : `<button class="card-inspector-icon-action" type="button" data-action="rename-card" data-card="${escapeHtml(card.id)}" aria-label="重命名标题" title="重命名标题"><svg aria-hidden="true" viewBox="0 0 16 16"><path d="M11.9 2.9 13.1 4.1 5.4 11.8 3.6 12.4 4.2 10.6Z"/><path d="m10.7 4.1 1.2 1.2"/></svg></button>`
   const addToNotes = `<button class="card-inspector-icon-action${noteSave === 'saved' ? ' is-saved' : ''}" type="button" data-action="add-to-notes" data-thread="${thread.id}" data-card="${escapeHtml(card.id)}" aria-label="${noteLabel}" title="${noteLabel}" ${noteBusy ? 'disabled' : ''}><svg aria-hidden="true" viewBox="0 0 16 16"><path d="M4.5 2.5h7A1.5 1.5 0 0 1 13 4v9.5L8 11.2 3 13.5V4A1.5 1.5 0 0 1 4.5 2.5Z"/></svg></button>`
   const tocButton = headings.length === 0 ? '' : `<button class="card-inspector-icon-action${state.inspectorTocOpen ? ' is-active' : ''}" type="button" data-action="toggle-inspector-toc" aria-expanded="${state.inspectorTocOpen ? 'true' : 'false'}" aria-label="目录" title="目录"><svg aria-hidden="true" viewBox="0 0 16 16"><path d="M3 4h10M3 8h10M3 12h7"/></svg></button>`
   const expandLabel = state.inspectorExpanded ? '还原' : '铺满'
@@ -1736,7 +2551,7 @@ function renderCardInspector(card) {
   const expandButton = `<button class="card-inspector-icon-action${state.inspectorExpanded ? ' is-active' : ''}" type="button" data-action="toggle-inspector-expand" aria-pressed="${state.inspectorExpanded ? 'true' : 'false'}" aria-label="${expandLabel}" title="${expandLabel}"><svg aria-hidden="true" viewBox="0 0 16 16">${expandIcon}</svg></button>`
   const inspectorClass = `card-inspector${state.inspectorOpening ? ' is-opening' : ''}${state.inspectorExpanded ? ' is-expanded' : ''}`
   const inspectorWidth = state.inspectorExpanded ? '100%' : `${clampInspectorWidth(state.inspectorWidth)}px`
-  return `<aside class="${inspectorClass}" aria-label="卡片详情" data-inspector-card="${escapeHtml(card.id)}" style="width:${inspectorWidth}"><div class="card-inspector-resize" role="separator" aria-orientation="vertical" aria-label="调整宽度" title="拖动调整宽度"></div><header class="card-inspector-head"><div><div class="card-inspector-meta"><span>第 ${card.turnIndex + 1} 轮</span>${errorText === null ? '' : '<span class="card-inspector-error-status">失败</span>'}${process.length > 0 ? `<span>工具 ${process.length}</span>` : ''}</div><h2>${escapeHtml(question)}</h2></div><div class="card-inspector-tools">${addToNotes}${tocButton}${expandButton}<button class="card-inspector-close" type="button" data-action="close-card-inspector" aria-label="关闭卡片详情" title="关闭"><svg aria-hidden="true" viewBox="0 0 16 16"><path d="m4.5 4.5 7 7m0-7-7 7"/></svg></button></div></header><div class="card-inspector-body"><div class="card-inspector-scroll">${error}${answer}${processRecordsHtml}</div>${renderInspectorToc(headings)}</div><footer class="card-inspector-actions">${continueAction}${branch}${removeBranchAction}${openDshAction}</footer></aside>`
+  return `<aside class="${inspectorClass}" aria-label="卡片详情" data-inspector-card="${escapeHtml(card.id)}" style="width:${inspectorWidth}"><div class="card-inspector-resize" role="separator" aria-orientation="vertical" aria-label="调整宽度" title="拖动调整宽度"></div><header class="card-inspector-head"><div class="card-inspector-meta"><span>第 ${card.turnIndex + 1} 轮</span>${errorText === null ? '' : '<span class="card-inspector-error-status">失败</span>'}</div><div class="card-inspector-tools">${renameAction}${addToNotes}${tocButton}${expandButton}<button class="card-inspector-close" type="button" data-action="close-card-inspector" aria-label="关闭卡片详情" title="关闭"><svg aria-hidden="true" viewBox="0 0 16 16"><path d="m4.5 4.5 7 7m0-7-7 7"/></svg></button></div>${state.renamingCardId === card.id ? cardRenameForm(card, 'card-inspector-rename-input') : `<h2>${escapeHtml(question)}</h2>`}</header><div class="card-inspector-body"><div class="card-inspector-scroll">${error}${answer}</div>${renderInspectorToc(headings)}</div><footer class="card-inspector-actions">${continueAction}${branch}${removeBranchAction}${openDshAction}</footer></aside>`
 }
 
 function renderThread() {
@@ -1747,15 +2562,11 @@ function renderThread() {
   const cards = turnsFor(thread).map((turn, index) => ({ id: `${thread.id}:turn:${turn.seq ?? `i${index}`}`, turn, index }))
   const body = cards.map(card => {
     const detail = historyForCard(thread, card.id)
-    const loading = detail === null && Number.isSafeInteger(card.turn.seq)
-    const answer = detail?.steps.filter(step => step.kind === 'assistant').map(step => step.text).join('\n\n')
-      ?? card.turn.answer
-      ?? ''
+    const answer = lastAssistantText(detail?.steps, card.turn.answer ?? '')
     const failure = detail?.steps.filter(step => step.kind === 'error').map(step => step.text).join('\n\n') ?? card.turn.error ?? ''
     const process = detail?.process ?? []
     const processHtml = process.length === 0 ? '' : processRecords(process, `${thread.id}:${card.id}:detail`)
-    const seq = card.turn.seq
-    return `<section class="detail-turn" data-card-id="${escapeHtml(card.id)}"><header class="detail-turn-head"><span class="detail-turn-index">第 ${card.index + 1} 轮</span>${process.length > 0 ? `<span class="detail-turn-tools">工具 ${process.length}</span>` : ''}</header><article class="message message-user"><header><span class="message-role">你</span></header><div class="message-body">${renderMarkdown(detail?.question ?? card.turn.question ?? '')}</div></article>${answer === '' && failure === '' ? `<p class="note-empty">${loading ? '正在读取完整内容…' : '等待助手回复'}</p>` : `<article class="message message-assistant"><header><span class="message-role">DSH</span></header><div class="message-body">${renderMarkdown(answer)}</div></article>`}${failure === '' ? '' : `<section class="card-inspector-error" role="alert"><strong>本轮未完成</strong><p>${escapeHtml(failure)}</p></section>`}${processHtml}</section>`
+    return `<section class="detail-turn" data-card-id="${escapeHtml(card.id)}"><header class="detail-turn-head"><span class="detail-turn-index">第 ${card.index + 1} 轮</span>${process.length > 0 ? `<span class="detail-turn-tools">工具 ${process.length}</span>` : ''}</header><article class="message message-user"><header><span class="message-role">你</span></header><div class="message-body">${renderMarkdown(detail?.question ?? card.turn.question ?? '')}</div></article>${answer === '' && failure === '' ? '<p class="note-empty">正在回复</p>' : `<article class="message message-assistant"><header><span class="message-role">DSH</span></header><div class="message-body">${renderMarkdown(answer)}</div></article>`}${failure === '' ? '' : `<section class="card-inspector-error" role="alert"><strong>本轮未完成</strong><p>${escapeHtml(failure)}</p></section>`}${processHtml}</section>`
   }).join('')
   const latestAssistantSeq = [...cards].reverse().find(card => Number.isSafeInteger(card.turn.answerSeq))?.turn.answerSeq
   return `<section class="detail-view"><header class="detail-head"><div class="detail-head-title"><div class="detail-head-meta"><span class="detail-badge">${thread.parentId === null ? '会话' : '分支'}</span>${thread.dshSessionTitle ?? thread.title ? `<span class="detail-subtitle">${escapeHtml(thread.dshSessionTitle ?? thread.title)}</span>` : ''}</div><h1>${escapeHtml(questionFor(thread))}</h1></div><div class="detail-head-actions"><button data-action="open-dsh" data-thread="${thread.id}" data-seq="${Number.isInteger(latestAssistantSeq) ? latestAssistantSeq : ''}" title="在原生对话中打开此会话">在 DSH 中打开</button><button data-action="open-branch" data-thread="${thread.id}" title="基于最新回答创建分支">创建分支</button><button class="primary" data-action="show-canvas">返回画布</button></div></header><div class="detail-scroll">${body || '<div class="note-empty">等待这条会话的第一条消息。</div>'}</div><form class="message-composer" data-compose="${thread.id}"><textarea maxlength="4000" placeholder="继续当前会话…" ${waiting ? 'disabled' : ''}></textarea><button class="primary" type="submit" ${waiting ? 'disabled' : ''}>${waiting ? '等待回复' : '发送'}</button></form></section>`
@@ -1791,7 +2602,9 @@ function render() {
   const view = state.mode === 'thread' ? renderThread() : renderCanvas()
   const choices = workspaceChoices()
   const selectedWorkspaceId = state.selectedDshWorkspaceId ?? workspace?.id
-  const showCanvasChrome = state.mode === 'canvas' && (threads.length > 0 || state.draft?.kind === 'new')
+  // The canvas renders even with zero cards (no empty state), so its chrome —
+  // zoom controls and minimap — must render with it.
+  const showCanvasChrome = state.mode === 'canvas'
   const canvasControls = showCanvasChrome ? `<div class="canvas-controls"><button data-action="layout" title="整理节点" aria-label="整理节点"><svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1"/><rect x="9" y="2.5" width="4.5" height="4.5" rx="1"/><rect x="2.5" y="9" width="4.5" height="4.5" rx="1"/><rect x="9" y="9" width="4.5" height="4.5" rx="1"/></svg>整理</button><button data-action="focus-active" title="定位到当前会话" aria-label="定位到当前会话"><svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><circle cx="8" cy="8" r="3.2"/><path d="M8 1.5v2.6M8 11.9v2.6M1.5 8h2.6M11.9 8h2.6"/></svg>定位</button><button data-action="zoom-out" aria-label="缩小" title="缩小"><svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M3.5 8h9"/></svg></button><span>${Math.round(state.zoom * 100)}%</span><button data-action="zoom-in" aria-label="放大" title="放大"><svg aria-hidden="true" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><path d="M8 3.5v9M3.5 8h9"/></svg></button></div>` : ''
   const canvasMinimap = showCanvasChrome ? renderCanvasMinimap() : ''
   const detailAvailable = currentThread() !== null
@@ -1825,6 +2638,15 @@ function render() {
     document.querySelector('.card-inspector')?.classList.remove('is-opening')
     state.inspectorOpening = false
   })
+  // A rename remounts its input on every render; focus it once and select the
+  // current title so typing replaces it outright.
+  if (state.renamingCardId !== null) {
+    const renameInput = app.querySelector(`[data-rename-input="${CSS.escape(state.renamingCardId)}"]`)
+    if (renameInput instanceof HTMLInputElement && document.activeElement !== renameInput) {
+      renameInput.focus()
+      renameInput.select()
+    }
+  }
   // Jump the detail view to the card the user clicked: card ids carry the
   // source sequence (`<thread>:turn:<seq>`), which matches data-message-seq
   // anchors on the rendered messages.
@@ -2183,7 +3005,7 @@ async function saveInspectorToNotes(card) {
   const thread = state.workspace?.threads.find(item => item.id === card.dshThreadId)
   const detail = thread === undefined ? null : historyForCard(thread, card.id)
   const body = inspectorNoteBody({
-    question: detail?.question ?? card.question,
+    question: card.customTitle ?? detail?.question ?? card.question,
     answer: reply.answerText,
     workspaceTitle: currentDshWorkspace()?.title ?? state.workspace?.title ?? '',
     sessionTitle: thread === undefined ? '' : threadListTitle(thread),
@@ -2199,6 +3021,28 @@ async function saveInspectorToNotes(card) {
   } catch {
     state.inspectorNoteSave = { cardId: card.id, status: 'error' }
     render()
+  }
+}
+
+/**
+ * Commit a card rename. The title is stored on the turn (`turn.title`) through
+ * the server so it survives reprojection and reloads; an empty title clears
+ * the override and the card falls back to the auto-derived question.
+ */
+async function commitCardRename(cardId, rawTitle) {
+  const card = state.canvasCardsById?.get(cardId)
+  state.renamingCardId = null
+  if (card === undefined) { render(); return }
+  const title = String(rawTitle ?? '').trim()
+  if (title === (card.customTitle ?? '')) { render(); return }
+  try {
+    const body = await api(`/synapse/api/threads/${card.dshThreadId}/cards/${encodeURIComponent(card.cardKey)}`, { method: 'PATCH', body: JSON.stringify({ title }) })
+    const threads = state.workspace?.threads ?? []
+    const index = threads.findIndex(item => item.id === body.thread?.id)
+    if (index !== -1) threads.splice(index, 1, body.thread)
+    render()
+  } catch (error) {
+    setError(error)
   }
 }
 
@@ -2263,6 +3107,35 @@ function focusActiveCard() {
   state.canvasCamera = {
     x: bounds.width / 2 - (left + CARD_WIDTH / 2) * state.zoom,
     y: bounds.height / 2 - (top + CARD_HEIGHT / 2) * state.zoom,
+  }
+  applyCanvasTransform()
+  syncCanvasViewport()
+}
+
+/**
+ * Center the canvas on a thread's latest card when it is off-screen.
+ *
+ * A just-submitted branch gets its own lane from the layout, which can sit
+ * far below the card the user was looking at (one lane per earlier sibling
+ * subtree). Without moving the camera the branch renders off-screen and
+ * looks lost — "点发送后画板上没有显示". Cards already on screen are left
+ * alone, so a follow-up that lands beside its parent never yanks the view.
+ */
+function revealThreadLatestCard(threadId) {
+  const viewport = document.querySelector('.canvas-viewport')
+  if (!(viewport instanceof HTMLElement)) return
+  const card = (state.canvasCards ?? []).filter(item => item.dshThreadId === threadId).at(-1)
+  if (card === undefined) return
+  const bounds = viewport.getBoundingClientRect()
+  const margin = 32
+  const left = card.position.x * state.zoom + state.canvasCamera.x
+  const top = card.position.y * state.zoom + state.canvasCamera.y
+  const right = (card.position.x + CARD_WIDTH) * state.zoom + state.canvasCamera.x
+  const bottom = (card.position.y + CARD_HEIGHT) * state.zoom + state.canvasCamera.y
+  if (left >= margin && top >= margin && right <= bounds.width - margin && bottom <= bounds.height - margin) return
+  state.canvasCamera = {
+    x: bounds.width / 2 - (card.position.x + CARD_WIDTH / 2) * state.zoom,
+    y: bounds.height / 2 - (card.position.y + CARD_HEIGHT / 2) * state.zoom,
   }
   applyCanvasTransform()
   syncCanvasViewport()
@@ -2422,6 +3295,15 @@ app.addEventListener('scroll', event => {
 }, true)
 document.addEventListener('selectionchange', queueSelectionFollowup)
 document.addEventListener('keydown', event => {
+  // Escape inside a rename input cancels the edit only — it must not fall
+  // through to the inspector's close-on-Escape below.
+  if (event.key === 'Escape' && event.target instanceof HTMLElement && event.target.matches('[data-rename-input]')) {
+    event.preventDefault()
+    event.stopPropagation()
+    state.renamingCardId = null
+    render()
+    return
+  }
   if (event.key !== 'Escape' || state.mode !== 'canvas' || state.inspectorCardId === null) return
   event.preventDefault()
   if (state.inspectorTocOpen) {
@@ -2430,6 +3312,16 @@ document.addEventListener('keydown', event => {
     return
   }
   closeCardInspector({ animate: false })
+})
+
+// Clicking away from the rename input commits the title, matching how the
+// draft composer keeps its text. A cancel (Escape) clears renamingCardId
+// first, so this only fires for a genuine commit.
+app.addEventListener('focusout', event => {
+  const input = event.target
+  if (!(input instanceof HTMLInputElement) || input.dataset.renameInput === undefined) return
+  if (state.renamingCardId !== input.dataset.renameInput) return
+  void commitCardRename(input.dataset.renameInput, input.value)
 })
 
 app.addEventListener('click', async event => {
@@ -2449,20 +3341,22 @@ app.addEventListener('click', async event => {
     if (thread === undefined) return
     const cardId = card.dataset.cardId
     if (cardId === undefined) return
-    state.activeId = thread.id
-    state.selectedCardId = cardId
-    openCardInspector(cardId)
+    const selection = canvasCardSelection(thread, cardId)
+    if (selection === null) return
+    state.activeId = selection.activeId
+    state.selectedCardId = selection.selectedCardId
+    openCardInspector(selection.inspectorCardId)
     state.error = ''
     render()
-    // Bidirectional current-session sync: switch DSH's current session
-    // without closing the map; the client confirms via synapse:current-session.
-    if (thread.dshSessionId !== null) {
-      if (thread.dshSessionId !== state.currentDsh?.id) state.mapCardSessionSwitches.add(thread.dshSessionId)
-      post('synapse:activate-session', { sessionId: thread.dshSessionId })
-    }
     return
   }
   const thread = state.workspace?.threads.find(item => item.id === button.dataset.thread)
+  if (button.dataset.action === 'watch-turn' || button.dataset.action === 'open-dsh') {
+    event.preventDefault()
+    event.stopPropagation()
+    dispatchCardSessionAction(button.dataset.action, thread, button.dataset.card, button.dataset.seq)
+    return
+  }
   try {
     if (button.dataset.action === 'follow-selection') {
       const followup = selectionFollowup
@@ -2511,6 +3405,14 @@ app.addEventListener('click', async event => {
       if (card !== undefined) void saveInspectorToNotes(card)
       return
     }
+    if (button.dataset.action === 'rename-card') {
+      const cardId = button.dataset.card ?? state.inspectorCardId
+      if (cardId !== null && cardId !== undefined && state.canvasCardsById?.has(cardId)) {
+        state.renamingCardId = cardId
+        render()
+      }
+      return
+    }
     if (button.dataset.action === 'toggle-sidebar') { state.sidebarCollapsed = !state.sidebarCollapsed; render() }
     if (button.dataset.action === 'create-session') openNewSession()
     if (button.dataset.action === 'open-current' && state.currentDsh !== null) post('synapse:open-session', { sessionId: state.currentDsh.id })
@@ -2520,8 +3422,7 @@ app.addEventListener('click', async event => {
       state.selectedCardId = null
       state.inspectorCardId = null
       state.inspectorOpening = false
-      dismissTurnPane()
-      state.error = ''
+          state.error = ''
       if (state.workspace !== null) revealConversationThread(conversationCards(visibleThreads()), thread.id)
       render()
       void loadThreadHistory(thread)
@@ -2557,9 +3458,7 @@ app.addEventListener('click', async event => {
     }
     if (button.dataset.action === 'cancel-draft') { state.draft = null; state.quickPhraseEditorOpen = false; render() }
     if (button.dataset.action === 'toggle-message' && button.dataset.message !== undefined) { state.expandedMessageIds.has(button.dataset.message) ? state.expandedMessageIds.delete(button.dataset.message) : state.expandedMessageIds.add(button.dataset.message); renderPreservingDetailScroll() }
-    if (button.dataset.action === 'watch-turn' && thread !== undefined) { watchCardTurn(thread, button.dataset.card); return }
     if (button.dataset.action === 'remove-branch' && thread !== undefined) { await removeBranch(thread); return }
-    if (button.dataset.action === 'open-dsh' && thread?.dshSessionId !== null) post('synapse:open-session', { sessionId: thread.dshSessionId, seq: Number.isInteger(Number(button.dataset.seq)) ? Number(button.dataset.seq) : undefined })
     if (button.dataset.action === 'zoom-in') zoomCanvasAtCenter(.1)
     if (button.dataset.action === 'zoom-out') zoomCanvasAtCenter(-.1)
     if (button.dataset.action === 'focus-active') focusActiveCard()
@@ -2583,7 +3482,6 @@ app.addEventListener('change', event => {
   const choice = workspaceChoices().find(item => item.id === select.value)
   state.inspectorCardId = null
   state.inspectorOpening = false
-  dismissTurnPane()
   if (choice?.source === 'dsh') {
     // Map → native sync: switching workspaces moves DSH's current session to
     // the workspace's most recently updated session, keeping both sides in step.
@@ -2600,6 +3498,13 @@ app.addEventListener('input', event => { const input = event.target; if (input i
 app.addEventListener('submit', event => {
   const form = event.target
   if (!(form instanceof HTMLFormElement)) return
+  // Enter inside a card-rename input submits this form; commit like a blur.
+  if (form.matches('[data-rename]')) {
+    event.preventDefault()
+    const input = form.querySelector('input')
+    void commitCardRename(form.dataset.rename, input instanceof HTMLInputElement ? input.value : '')
+    return
+  }
   if (form.matches('[data-draft]')) { event.preventDefault(); void submitDraft(); return }
   const thread = state.workspace?.threads.find(item => item.id === form.dataset.compose)
   const input = form.querySelector('textarea')
@@ -2614,6 +3519,8 @@ window.addEventListener('message', event => {
   if (event.origin !== window.location.origin || event.data?.source !== 'dsh-synapse') return
   const data = event.data
   if (data.type === 'synapse:close-inspector') {
+    // The host turn pane and the in-canvas inspector share the right rail, so
+    // opening one asks the other to close; they never sit side by side.
     if (state.inspectorCardId !== null) closeCardInspector({ animate: false })
     return
   }
@@ -2663,19 +3570,27 @@ window.addEventListener('message', event => {
     // The canvas is scoped to the current session, so a switch replaces its
     // whole content: the old camera would point at coordinates that no longer
     // hold anything. Re-center unless the switch was triggered from inside the
-    // map itself (a card click), where keeping the viewport is the point.
+    // map itself (an explicit session action), where keeping the viewport is
+    // the point. A plain card click only opens the local inspector.
     const sessionSwitched = previousId !== data.session?.id
     const preserveCanvasCamera = sessionSwitched && state.mapCardSessionSwitches.delete(data.session?.id)
     if (sessionSwitched && !preserveCanvasCamera) resetCanvasCamera()
     state.currentDsh = data.session
     const thread = currentDshThread()
     if (thread !== undefined) {
-      const preserveSelectedCard = state.activeId === thread.id
-      state.activeId = thread.id
-      if (!preserveSelectedCard) {
-        state.selectedCardId = null
-        state.inspectorCardId = null
-        state.inspectorOpening = false
+      // Only a real session switch moves the selection. This message also
+      // arrives on every session-list refresh (a fork was created, a title
+      // changed); resetting activeId there would yank the canvas scope away
+      // from a branch the user just created, and close the card inspector
+      // they are reading.
+      if (sessionSwitched) {
+        const preserveSelectedCard = state.activeId === thread.id
+        state.activeId = thread.id
+        if (!preserveSelectedCard) {
+          state.selectedCardId = null
+          state.inspectorCardId = null
+          state.inspectorOpening = false
+        }
       }
       if (state.workspace !== null) revealConversationThread(conversationCards(visibleThreads()), thread.id)
     }
@@ -2697,8 +3612,9 @@ window.addEventListener('message', event => {
   if (data.type === 'synapse:live-reply' && typeof data.sessionId === 'string') {
     const thread = state.workspace?.threads.find(item => item.dshSessionId === data.sessionId)
     if (thread !== undefined) {
+      const previous = state.liveReplies.get(data.sessionId)
       if (data.running === true) {
-        state.liveReplies.set(data.sessionId, { running: true, text: typeof data.text === 'string' ? data.text : '' })
+        state.liveReplies.set(data.sessionId, nextLiveReply(previous, true, data.text))
         // Streaming: patch the live card's answer in place instead of
         // rebuilding the whole canvas on every chunk; a full render reconciles
         // at stream end. The detail view is single-thread, so keep its cheap
@@ -2706,8 +3622,14 @@ window.addEventListener('message', event => {
         if (state.mode === 'canvas') scheduleLiveCardUpdate(data.sessionId)
         else if (canReplaceView()) scheduleLiveRender()
       } else {
-        state.liveReplies.delete(data.sessionId)
+        const tracked = previous !== undefined || state.pendingReplies.has(data.sessionId)
+        if (!tracked) return
+        const completed = nextLiveReply(previous, false, data.text)
+        if (completed === null) state.liveReplies.delete(data.sessionId)
+        else state.liveReplies.set(data.sessionId, completed)
+        const question = state.pendingReplies.get(data.sessionId)?.text
         if (canReplaceView() || state.pendingReplies.has(data.sessionId)) renderPreservingDetailScroll()
+        void refreshCompletedReply(data.sessionId, question)
       }
     }
   }

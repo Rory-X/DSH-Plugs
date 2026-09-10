@@ -2,7 +2,7 @@ import { rm } from 'node:fs/promises'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import { dirname } from 'node:path'
 import type { Context, SessionEvent, SessionHeader } from '@just-genius/dsh-plugin-runtime/host'
-import { HOST_SERVICES, SessionId } from '@just-genius/dsh-plugin-runtime/host'
+import { HOST_SERVICES, SessionId, sessionEventsOf } from '@just-genius/dsh-plugin-runtime/host'
 
 import {
   DELETE_PATH,
@@ -94,13 +94,13 @@ async function listArchived(ctx: Context): Promise<ArchiveListPayload> {
     let title = String(id)
     let updatedAt: number | null = header?.createdAt ?? null
     if (live !== undefined) {
-      const derived = titleFromEvents(live.events as SessionEvent[], title)
+      const derived = titleFromSession(live, title)
       title = derived.title
       updatedAt = derived.updatedAt ?? updatedAt
     } else if (header !== undefined) {
       try {
         const inspection = await ctx.sessionPersistence.inspect(header.id)
-        const derived = titleFromEvents(inspection.events as SessionEvent[], title)
+        const derived = titleFromSession(inspection, title)
         title = derived.title
         updatedAt = derived.updatedAt ?? inspection.meta.createdAt
       } catch {
@@ -182,8 +182,21 @@ async function readHeader(ctx: Context, sessionId: SessionId): Promise<SessionHe
   return headers.find((header) => String(header.id) === String(sessionId))
 }
 
-function liveSession(ctx: Context, sessionId: SessionId): { events: readonly SessionEvent[]; header: SessionHeader } | undefined {
+function liveSession(ctx: Context, sessionId: SessionId): { events?: unknown; header: SessionHeader } | undefined {
   return ctx.get('sessions')?.get(sessionId)
+}
+
+/**
+ * Derive archive metadata without assuming that a session log is readable.
+ *
+ * Live sessions expose `events` through a prototype getter, while persistence
+ * inspections are plain snapshots. During startup or across duplicated
+ * runtime packages either object can temporarily expose a missing or
+ * non-iterable value. The shared adapter normalizes those cases to an empty
+ * log, so opening the archive page still lists the session by its id/header.
+ */
+function titleFromSession(session: { events?: unknown } | null | undefined, fallback: string): { title: string; updatedAt: number | null } {
+  return titleFromEvents(sessionEventsOf(session) as readonly SessionEvent[], fallback)
 }
 
 function titleFromEvents(events: readonly SessionEvent[], fallback: string): { title: string; updatedAt: number | null } {

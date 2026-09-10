@@ -6,6 +6,8 @@
  * dsh-workspace-menu v1.2.0, minus the destructive delete actions.
  */
 
+import { parseSessionPins, type SessionPin } from './session-pins.ts'
+
 export type FeatureKey =
   | 'dblclick'
   | 'contextmenu'
@@ -20,9 +22,7 @@ export type FeatureKey =
   | 'sessionUnread'
   | 'sessionArchive'
   | 'sessionFork'
-  | 'sessionCopyLink'
-  | 'sessionCopyTitle'
-  | 'sessionOpenWindow'
+  | 'sessionCopyReference'
   | 'sessionOpenFolder'
 
 export const FEATURE_KEYS: readonly FeatureKey[] = [
@@ -39,9 +39,7 @@ export const FEATURE_KEYS: readonly FeatureKey[] = [
   'sessionUnread',
   'sessionArchive',
   'sessionFork',
-  'sessionCopyLink',
-  'sessionCopyTitle',
-  'sessionOpenWindow',
+  'sessionCopyReference',
   'sessionOpenFolder',
 ]
 
@@ -63,9 +61,7 @@ export const SESSION_KEYS: readonly FeatureKey[] = [
   'sessionUnread',
   'sessionArchive',
   'sessionFork',
-  'sessionCopyLink',
-  'sessionCopyTitle',
-  'sessionOpenWindow',
+  'sessionCopyReference',
   'sessionOpenFolder',
 ]
 
@@ -85,15 +81,13 @@ const DEFAULT_FEATURES: FeatureMap = {
   sessionUnread: true,
   sessionArchive: true,
   sessionFork: true,
-  sessionCopyLink: true,
-  sessionCopyTitle: true,
-  sessionOpenWindow: true,
+  sessionCopyReference: true,
   sessionOpenFolder: true,
 }
 
 export interface MenuState {
   pinnedWorkspaces: string[]
-  pinnedSessions: string[]
+  pinnedSessions: SessionPin[]
   unreadSessions: string[]
   features: FeatureMap
 }
@@ -131,13 +125,23 @@ function parse(raw: string | null): MenuState {
     const value = JSON.parse(raw) as Partial<MenuState>
     return {
       pinnedWorkspaces: Array.isArray(value.pinnedWorkspaces) ? value.pinnedWorkspaces : [],
-      pinnedSessions: Array.isArray(value.pinnedSessions) ? value.pinnedSessions : [],
+      pinnedSessions: parseSessionPins(value.pinnedSessions),
       unreadSessions: Array.isArray(value.unreadSessions) ? value.unreadSessions : [],
-      features: { ...DEFAULT_FEATURES, ...(value.features ?? {}) },
+      features: parseFeatures(value.features),
     }
   } catch {
     return defaultState()
   }
+}
+
+function parseFeatures(value: unknown): FeatureMap {
+  const features = { ...DEFAULT_FEATURES }
+  if (value === null || typeof value !== 'object') return features
+  const stored = value as Record<string, unknown>
+  for (const key of FEATURE_KEYS) {
+    if (typeof stored[key] === 'boolean') features[key] = stored[key]
+  }
+  return features
 }
 
 function load(): MenuState {
@@ -175,8 +179,8 @@ export function setPinnedWorkspaces(ids: string[]): void {
   commit({ ...state, pinnedWorkspaces: ids })
 }
 
-export function setPinnedSessions(ids: string[]): void {
-  commit({ ...state, pinnedSessions: ids })
+export function setPinnedSessions(pins: SessionPin[]): void {
+  commit({ ...state, pinnedSessions: pins })
 }
 
 export function setUnreadSessions(ids: string[]): void {

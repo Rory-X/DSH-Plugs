@@ -58,6 +58,48 @@ window.__ModuleLoader__.load({
       const raw = data !== null && typeof data === 'object' ? data.seq : undefined
       return typeof raw === 'number' && Number.isFinite(raw) ? raw : undefined
     }
+    const nodeOfChat = (chat, key) => {
+      if (chat == null || chat.nodes == null) return undefined
+      return typeof chat.nodes.get === 'function' ? chat.nodes.get(key) : chat.nodes[key]
+    }
+    const assistantTextOfBlocks = blocks => Array.isArray(blocks)
+      ? blocks.filter(block => block?.kind === 'text').map(block => String(block.text ?? '')).join('\n')
+      : ''
+    const replyTextOfSnapshot = snapshot => {
+      const partial = assistantTextOfBlocks(snapshot?.partial?.blocks)
+      if (snapshot?.running === true || partial !== '') return partial
+      const keys = Array.from(snapshot?.chat?.order ?? [])
+      for (let index = keys.length - 1; index >= 0; index--) {
+        const node = nodeOfChat(snapshot?.chat, keys[index])
+        if (node?.visibility === 'hidden') continue
+        if (node?.kind === 'user' || node?.kind === 'steering') return ''
+        if (node?.kind !== 'assistant-step') continue
+        const text = assistantTextOfBlocks(node.data?.blocks)
+        if (text !== '') return text
+      }
+      return ''
+    }
+    const turnNumberOf = node => {
+      const location = node?.location
+      if (location?.kind === 'turn' || location?.kind === 'step') {
+        const turn = location.turn?.turn
+        return typeof turn === 'number' && Number.isFinite(turn) ? turn : undefined
+      }
+      return undefined
+    }
+    const visibleUserKeys = chat => {
+      const keys = []
+      for (const key of Array.from(chat?.order ?? [])) {
+        const node = nodeOfChat(chat, key)
+        if (node != null && (node.kind === 'user' || node.kind === 'steering') && node.visibility !== 'hidden') keys.push(key)
+      }
+      return keys
+    }
+    const keysForTurn = (chat, turn) => {
+      const indexed = typeof chat?.locations?.getTurn === 'function' ? chat.locations.getTurn(turn) : undefined
+      if (Array.isArray(indexed) && indexed.length > 0) return [...indexed]
+      return Array.from(chat?.order ?? []).filter(key => turnNumberOf(nodeOfChat(chat, key)) === turn)
+    }
     const asRecord = data => data !== null && typeof data === 'object' ? data : null
     const textOfContent = content => {
       if (!Array.isArray(content)) return ''
@@ -98,47 +140,80 @@ window.__ModuleLoader__.load({
       if (parts.length === 0 && node.error != null) parts.push(`${node.error.name ?? 'Error'}: ${node.error.code ?? ''}`)
       return parts.join('\n')
     }
-    // Slice one user turn out of the live session chat (same nodes side-chat
-    // renders). seq is the user event; turnIndex is the fallback when seq is
-    // missing. Read-only: the pane never prompts.
-    const sliceTurnNodes = (chat, seq, turnIndex) => {
-      if (chat == null || chat.order == null || chat.nodes == null) return []
-      const order = Array.from(chat.order)
-      const nodeOf = key => typeof chat.nodes.get === 'function' ? chat.nodes.get(key) : chat.nodes[key]
-      const userKeys = []
-      for (const key of order) {
-        const node = nodeOf(key)
-        if (node != null && node.kind === 'user' && node.visibility !== 'hidden') userKeys.push(key)
-      }
-      let start = -1
-      if (Number.isInteger(seq)) start = userKeys.findIndex(key => seqOf(nodeOf(key)) === seq)
-      if (start === -1 && Number.isInteger(turnIndex) && turnIndex >= 0 && turnIndex < userKeys.length) start = turnIndex
-      if (start === -1) return []
-      const from = order.indexOf(userKeys[start])
-      const endKey = userKeys[start + 1]
+    // Slice one user turn out of the live Chat target. Prefer the official
+    // turn location index (DSH 0.1.2+); fall back to visible user rows when
+    // a snapshot has no locations or the window has not loaded that turn.
+    // seq is the user event; turnIndex is the 0-based card fallback.
+    const keysBetweenUser = (chat, userKey) => {
+      const order = Array.from(chat?.order ?? [])
+      const from = order.indexOf(userKey)
+      if (from === -1) return []
+      const userKeys = visibleUserKeys(chat)
+      const index = userKeys.indexOf(userKey)
+      const endKey = index === -1 ? undefined : userKeys[index + 1]
       const to = endKey === undefined ? order.length : order.indexOf(endKey)
-      const nodes = []
-      for (let index = from; index < to; index += 1) {
-        const node = nodeOf(order[index])
-        if (node != null) nodes.push(node)
-      }
-      return nodes
+      return order.slice(from, to === -1 ? order.length : to)
     }
+    const sliceTurnKeys = (chat, seq, turnIndex) => {
+      if (chat == null || chat.order == null) return []
+      const order = Array.from(chat.order)
+      const resolved = keys => (Array.isArray(keys) && keys.length > 0 ? keys : null)
+      let userKey
+      if (Number.isInteger(seq)) {
+        for (const key of order) {
+          const node = nodeOfChat(chat, key)
+          if (node == null || seqOf(node) !== seq) continue
+          if (node.kind === 'user' || node.kind === 'steering') { userKey = key; break }
+          if (userKey === undefined) userKey = key
+        }
+      }
+      const turn = userKey === undefined ? undefined : turnNumberOf(nodeOfChat(chat, userKey))
+      if (turn !== undefined) {
+        const keys = resolved(keysForTurn(chat, turn))
+        if (keys !== null) return keys
+      }
+      if (userKey !== undefined) return keysBetweenUser(chat, userKey)
+      if (Number.isInteger(turnIndex)) {
+        const keyed = resolved(keysForTurn(chat, turnIndex + 1)) ?? resolved(keysForTurn(chat, turnIndex))
+        if (keyed !== null) return keyed
+        const userKeys = visibleUserKeys(chat)
+        if (turnIndex >= 0 && turnIndex < userKeys.length) {
+          const key = userKeys[turnIndex]
+          const keyedTurn = turnNumberOf(nodeOfChat(chat, key))
+          if (keyedTurn !== undefined) {
+            const keys = resolved(keysForTurn(chat, keyedTurn))
+            if (keys !== null) return keys
+          }
+          return keysBetweenUser(chat, key)
+        }
+      }
+      return []
+    }
+    const sliceTurnNodes = (chat, seq, turnIndex) =>
+      sliceTurnKeys(chat, seq, turnIndex).map(key => nodeOfChat(chat, key)).filter(node => node != null)
     const isLastUserTurn = (chat, seq, turnIndex) => {
       if (chat == null || chat.order == null || chat.nodes == null) return true
-      const order = Array.from(chat.order)
-      const nodeOf = key => typeof chat.nodes.get === 'function' ? chat.nodes.get(key) : chat.nodes[key]
-      const userKeys = order.filter(key => {
-        const node = nodeOf(key)
-        return node != null && node.kind === 'user' && node.visibility !== 'hidden'
+      const sliced = sliceTurnKeys(chat, seq, turnIndex)
+      if (sliced.length === 0) return true
+      const lastVisible = [...Array.from(chat.order)].reverse().find(key => {
+        const node = nodeOfChat(chat, key)
+        return node != null && node.visibility !== 'hidden' && node.kind !== 'turn-tail'
       })
-      let start = -1
-      if (Number.isInteger(seq)) start = userKeys.findIndex(key => seqOf(nodeOf(key)) === seq)
-      if (start === -1 && Number.isInteger(turnIndex)) start = turnIndex
-      return start === -1 || start === userKeys.length - 1
+      return lastVisible !== undefined && sliced.includes(lastVisible)
+    }
+    const MARKDOWN_CODE_LABELS = { copyLabel: '复制', copiedLabel: '已复制' }
+    const MARKDOWN_LABELS = { code: MARKDOWN_CODE_LABELS, footnotes: '脚注' }
+    function markdownBodyProps(text, streaming) {
+      return {
+        text: String(text ?? ''),
+        streaming: streaming === true,
+        // 0.1.2 requires labels; 0.1.1 still reads codeLabels.
+        labels: MARKDOWN_LABELS,
+        codeLabels: MARKDOWN_CODE_LABELS,
+      }
     }
     function MarkdownBody({ text, streaming }) {
-      if (primitives?.MarkdownText) return h(primitives.MarkdownText, { text, streaming: streaming === true, codeLabels: { copyLabel: '复制', copiedLabel: '已复制' } })
+      if (primitives?.MarkdownText) return h(primitives.MarkdownText, markdownBodyProps(text, streaming))
       return h('div', { className: 'dsh-codex-sidechat-md-fallback' }, text)
     }
     // Compact outline glyphs matching dsh-codex's tool/think leading icons.
@@ -238,16 +313,106 @@ window.__ModuleLoader__.load({
           return h('div', { className: 'dsh-codex-sidechat-status-row' }, '已达到输出上限')
         case 'model-retry':
           return h('div', { className: 'dsh-codex-sidechat-status-row' }, '正在重试…')
+        case 'command': {
+          const name = typeof data.name === 'string' && data.name !== '' ? data.name : 'command'
+          const args = typeof data.args === 'string' ? data.args.trim() : ''
+          const outcome = asRecord(data.outcome)
+          const outcomeText = typeof outcome?.text === 'string' ? outcome.text : ''
+          return h(FoldRow, { title: `/${name}`, summary: firstLineOf(outcomeText || args), body: [args, outcomeText].filter(part => part.length > 0).join('\n'), error: outcome?.kind === 'error', kind: 'tool', variant: 'others' })
+        }
+        case 'context': {
+          const body = textOfContent(data.content)
+          const provenance = asRecord(data.provenance)
+          const label = typeof provenance?.label === 'string' && provenance.label !== '' ? provenance.label : '上下文'
+          return h(FoldRow, { title: label, summary: firstLineOf(body), body, kind: 'think', variant: 'think' })
+        }
         case 'compaction':
         case 'manual-compaction': {
           const summary = typeof data.summary === 'string' ? data.summary : asRecord(data.compaction)?.summary
           return h(FoldRow, { title: '上下文已压缩', summary: typeof summary === 'string' ? firstLineOf(summary) : '', body: typeof summary === 'string' ? summary : '', kind: 'tool', variant: 'others' })
         }
         default:
-          return null
+          return primitives?.JsonBlock
+            ? h(primitives.JsonBlock, { label: node.kind, payload: node.data, defaultOpen: false })
+            : null
       }
     }
-    function SynapseTurnPane({ watch, ctx, onClose, onOpenInDialog }) {
+    const loadTurnThrough = (ctx, sessionId, seq) => {
+      if (!Number.isInteger(seq)) return
+      try {
+        const scope = ctx.sessions.scope(sessionId)
+        const session = scope === undefined ? undefined : ctx.sessions.sessionOf(scope)
+        if (session !== undefined && typeof session.loadThrough === 'function') return session.loadThrough(seq)
+      } catch { /* session gone */ }
+    }
+    function TurnNodeSeat({ node }) {
+      if (node == null || node.visibility === 'hidden') return null
+      return h('div', {
+        className: 'dsh-synapse-turn-node',
+        'data-chat-anchor-key': node.key,
+        'data-chat-flow-kind': node.kind,
+      }, h(ChatNodeView, { node }))
+    }
+    function OfficialTurnPane({ watch, ctx, onClose, onOpenInDialog, useChat, useSession, sessionId, loadThrough }) {
+      const transcriptRef = React.useRef(null)
+      const scrollTopRef = React.useRef(0)
+      const watchKey = `${watch.sessionId}:${watch.seq ?? ''}:${watch.turnIndex ?? ''}`
+      const lastWatchKeyRef = React.useRef(watchKey)
+      if (lastWatchKeyRef.current !== watchKey) {
+        lastWatchKeyRef.current = watchKey
+        scrollTopRef.current = 0
+      }
+      const order = useChat(snapshot => snapshot?.order ?? [])
+      const nodes = useChat(snapshot => snapshot?.nodes)
+      const locations = useChat(snapshot => snapshot?.locations)
+      const running = typeof useSession === 'function' ? useSession(snapshot => snapshot?.running === true) : false
+      const chat = { order, nodes, locations }
+      const keys = sliceTurnKeys(chat, watch.seq, watch.turnIndex)
+      const turnNodes = keys.map(key => nodeOfChat(chat, key)).filter(node => node != null && node.kind !== 'turn-tail')
+      const ready = sessionId == null || sessionId === watch.sessionId
+      React.useEffect(() => {
+        if (!ready || keys.length > 0 || !Number.isInteger(watch.seq)) return
+        const loader = typeof loadThrough === 'function' ? loadThrough(watch.seq) : loadTurnThrough(ctx, watch.sessionId, watch.seq)
+        if (loader != null) void Promise.resolve(loader).catch(() => {})
+      }, [ready, keys.length, watch.seq, watch.sessionId, loadThrough, ctx])
+      React.useLayoutEffect(() => {
+        const node = transcriptRef.current
+        if (node instanceof HTMLElement) node.scrollTop = scrollTopRef.current
+      })
+      const lastTurn = isLastUserTurn(chat, watch.seq, watch.turnIndex)
+      const pending = running && lastTurn
+      return h('aside', { className: 'dsh-synapse-turn-pane', 'aria-label': '本轮对话' },
+        h('header', { className: 'dsh-synapse-turn-pane-head' },
+          h('div', { className: 'dsh-synapse-turn-pane-meta' },
+            h('span', { className: 'dsh-synapse-turn-pane-badge' }, Number.isInteger(watch.turnIndex) ? `第 ${watch.turnIndex + 1} 轮` : '本轮'),
+          ),
+          h('div', { className: 'dsh-synapse-turn-pane-actions' },
+            h('button', { type: 'button', onClick: onOpenInDialog }, '在会话中打开'),
+            h('button', { type: 'button', className: 'dsh-synapse-turn-pane-close', onClick: onClose, 'aria-label': '关闭本轮' }, '×'),
+          ),
+        ),
+        !ready
+          ? h('div', { className: 'dsh-codex-sidechat-empty-panel' }, h('p', null, '正在打开这一轮…'))
+          : h('div', {
+              className: 'dsh-synapse-turn-flow',
+              ref: transcriptRef,
+              onScroll: event => { scrollTopRef.current = event.currentTarget.scrollTop },
+            },
+              h('div', { className: 'dsh-synapse-turn-column' },
+                turnNodes.map(node => h(TurnNodeSeat, { key: node.key, node })),
+                pending ? h('div', { key: 'running', className: 'dsh-codex-sidechat-turn-status', role: 'status' }, '正在回复') : null,
+                turnNodes.length === 0 && !pending
+                  ? h('div', { className: 'dsh-codex-sidechat-empty' },
+                      h('div', { className: 'dsh-codex-sidechat-empty-hero' },
+                        h('h2', { className: 'dsh-codex-sidechat-empty-title' }, '正在回复'),
+                      ),
+                    )
+                  : null,
+              ),
+            ),
+      )
+    }
+    function LegacyTurnPane({ watch, ctx, onClose, onOpenInDialog }) {
       const [, setTick] = React.useState(0)
       const transcriptRef = React.useRef(null)
       const scrollTopRef = React.useRef(0)
@@ -258,7 +423,6 @@ window.__ModuleLoader__.load({
         scrollTopRef.current = 0
       }
       React.useEffect(() => {
-        try { ctx.sessions.open(watch.sessionId) } catch { /* session gone */ }
         let unsubscribe = () => {}
         let timer = 0
         let tries = 0
@@ -274,6 +438,8 @@ window.__ModuleLoader__.load({
             return
           }
           unsubscribe = session.subscribe(() => setTick(value => value + 1))
+          const loader = loadTurnThrough(ctx, watch.sessionId, watch.seq)
+          if (loader != null) void Promise.resolve(loader).then(() => setTick(value => value + 1)).catch(() => {})
           setTick(value => value + 1)
         }
         bind()
@@ -311,14 +477,123 @@ window.__ModuleLoader__.load({
                 nodes.length === 0 && !running
                   ? h('div', { className: 'dsh-codex-sidechat-empty' },
                       h('div', { className: 'dsh-codex-sidechat-empty-hero' },
-                        h('h2', { className: 'dsh-codex-sidechat-empty-title' }, '这一轮还没有内容'),
-                        h('p', { className: 'dsh-codex-sidechat-empty-hint' }, '等待这一轮的第一条消息。'),
+                        h('h2', { className: 'dsh-codex-sidechat-empty-title' }, '正在回复'),
                       ),
                     )
                   : null,
               ),
             ),
       )
+    }
+    async function readTurnDetail(watch, request = fetch) {
+      const response = await request('/synapse/api/turn-detail', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          sessionId: watch.sessionId,
+          seq: Number.isInteger(watch.seq) ? watch.seq : null,
+          turnIndex: Number.isInteger(watch.turnIndex) ? watch.turnIndex : null,
+        }),
+      })
+      if (!response.ok) throw new Error('detail unavailable')
+      const value = await response.json()
+      return value?.detail ?? { question: null, steps: [], process: [] }
+    }
+    function RemoteTurnPane({ watch, onClose, onOpenInDialog }) {
+      const [detail, setDetail] = React.useState(null)
+      const [failed, setFailed] = React.useState(false)
+      const transcriptRef = React.useRef(null)
+      const watchKey = `${watch.sessionId}:${watch.seq ?? ''}:${watch.turnIndex ?? ''}`
+      React.useEffect(() => {
+        let cancelled = false
+        setDetail(null)
+        setFailed(false)
+        readTurnDetail(watch)
+          .then(value => { if (!cancelled) setDetail(value) })
+          .catch(() => { if (!cancelled) setFailed(true) })
+        return () => { cancelled = true }
+      }, [watchKey, watch.sessionId, watch.seq])
+      const steps = Array.isArray(detail?.steps) ? detail.steps : []
+      const process = Array.isArray(detail?.process) ? detail.process : []
+      const question = typeof detail?.question === 'string' ? detail.question : ''
+      return h('aside', { className: 'dsh-synapse-turn-pane', 'aria-label': '本轮对话' },
+        h('header', { className: 'dsh-synapse-turn-pane-head' },
+          h('div', { className: 'dsh-synapse-turn-pane-meta' },
+            h('span', { className: 'dsh-synapse-turn-pane-badge' }, Number.isInteger(watch.turnIndex) ? `第 ${watch.turnIndex + 1} 轮` : '本轮'),
+          ),
+          h('div', { className: 'dsh-synapse-turn-pane-actions' },
+            h('button', { type: 'button', onClick: onOpenInDialog }, '在会话中打开'),
+            h('button', { type: 'button', className: 'dsh-synapse-turn-pane-close', onClick: onClose, 'aria-label': '关闭本轮' }, '×'),
+          ),
+        ),
+        h('div', { className: 'dsh-synapse-turn-flow', ref: transcriptRef },
+          failed
+            ? h('div', { className: 'dsh-codex-sidechat-empty-panel' }, h('p', null, '这一轮暂时无法读取'))
+            : detail === null
+              ? h('div', { className: 'dsh-codex-sidechat-empty-panel' }, h('p', null, '正在打开这一轮…'))
+              : h('div', { className: 'dsh-synapse-turn-column' },
+                  question === '' ? null : h('div', { className: 'dsh-codex-sidechat-user' },
+                    h('div', { className: 'dsh-codex-sidechat-user-bubble' }, question),
+                  ),
+                  steps.map((step, index) => step?.kind === 'assistant'
+                    ? h(MarkdownBody, { key: `assistant:${index}`, text: String(step.text ?? ''), streaming: false })
+                    : step?.kind === 'error'
+                      ? h('div', { key: `error:${index}`, className: 'dsh-codex-sidechat-status-row is-error' }, String(step.text ?? '本轮未完成'))
+                      : null),
+                  process.length === 0 ? null : h('div', { className: 'dsh-codex-sidechat-remote-process' },
+                    process.map((entry, index) => h(FoldRow, {
+                      key: `process:${index}`,
+                      title: String(entry?.name ?? 'Tool call'),
+                      summary: String(entry?.error ?? entry?.result ?? '').split('\n')[0],
+                      body: [entry?.arguments, entry?.result, entry?.error].filter(value => typeof value === 'string' && value !== '').join('\n\n'),
+                      error: typeof entry?.error === 'string' && entry.error !== '',
+                      kind: 'tool',
+                      variant: TOOL_VARIANTS[entry?.name] ?? 'others',
+                    })),
+                  ),
+                ),
+        ),
+      )
+    }
+    // The host retires the entire map slot when a descendant render throws.
+    class TurnPaneErrorBoundary extends React.Component {
+      state = { error: null }
+      static getDerivedStateFromError(error) {
+        return { error }
+      }
+      componentDidCatch(error) {
+        console.error('[dsh-synapse] turn preview failed', error)
+      }
+      render() {
+        if (this.state.error === null) return this.props.children
+        return h('aside', { className: 'dsh-synapse-turn-pane', 'aria-label': '本轮对话' },
+          h('header', { className: 'dsh-synapse-turn-pane-head' },
+            h('span', null, '本轮对话'),
+            h('button', { type: 'button', onClick: this.props.onClose, 'aria-label': '关闭本轮' }, '×'),
+          ),
+          h('div', { className: 'dsh-synapse-turn-flow', role: 'alert' },
+            h('p', null, '这一轮渲染失败'),
+            h('pre', { style: { whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' } },
+              String(this.state.error?.message ?? this.state.error),
+            ),
+          ),
+        )
+      }
+    }
+    function turnPaneSource(watchSessionId, currentSessionId, hasOfficialHooks) {
+      return hasOfficialHooks === true && watchSessionId === currentSessionId ? 'official' : 'remote'
+    }
+    function SynapseTurnPane(props) {
+      const currentSessionId = props.ctx.sessions.list.getSnapshot().current
+      if (turnPaneSource(props.watch.sessionId, currentSessionId, typeof props.useChat === 'function') === 'official') return h(OfficialTurnPane, props)
+      // A non-current session has no staged chat window. Preview it through
+      // the read-only route, including hosts that do not expose chat hooks.
+      return h(RemoteTurnPane, {
+        key: `${props.watch.sessionId}:${props.watch.seq ?? ''}:${props.watch.turnIndex ?? ''}`,
+        watch: props.watch,
+        onClose: props.onClose,
+        onOpenInDialog: props.onOpenInDialog,
+      })
     }
     const turnWatch = {
       value: null,
@@ -344,7 +619,7 @@ window.__ModuleLoader__.load({
     // Host chrome hidden while the map is the active session view: the codex
     // message rail and the right-side terminal/files panels. They are portalled
     // into <body> by that plugin, so they are addressed by its own class names.
-    const CHROME_HIDE_SELECTORS = ['.dsh-codex-nav-rail', '.dsh-side-panels', '.dsh-side-panels-launcher']
+    const CHROME_HIDE_SELECTORS = ['.dsh-codex-nav-rail', '.dsh-side-panels', '.dsh-side-panels-launcher', '[data-width-handle]']
     const CHROME_HIDE_CLASS = 'dsh-synapse-chrome-hidden'
     // The map has its own composer inside the canvas, so DSH's dock is removed
     // outright: display:none (unlike the panels above) reclaims its space.
@@ -616,29 +891,6 @@ window.__ModuleLoader__.load({
     }
   }, true)
 
-  // Show only the current DSH conversation's cards. conversationCards is a
-  // top-level function declaration, so re-binding it here is picked up by the
-  // app's own call sites without patching upstream source.
-  var originalConversationCards = window.conversationCards
-  if (typeof originalConversationCards === 'function') {
-    window.conversationCards = function (threads) {
-      // Resolved here rather than through currentDshThread(): that helper
-      // returns undefined whenever the current-session id is missing, and a
-      // fallback to "all threads" here would leak every conversation back onto
-      // the canvas (seen when 整理/定位 re-rendered).
-      try {
-        var list = state?.workspace?.threads ?? threads
-        var currentId = state?.currentDsh?.id ?? state?.activeId
-        if (typeof currentId !== 'string' || currentId === '') return []
-        var current = list.find(function (thread) {
-          return thread?.dshSessionId === currentId || thread?.id === currentId
-        })
-        if (current === undefined) return []
-        return originalConversationCards([current])
-      } catch (error) { return [] }
-    }
-  }
-
   // User-facing copy: DSH's product name reads as 会话 in this UI. Rewritten
   // in the DOM (not in upstream source) so upstream updates stay clean. Only
   // text and label attributes are touched, and script/style contents are
@@ -821,19 +1073,24 @@ window.__ModuleLoader__.load({
       }
       const style = document.createElement('style')
       style.textContent = [
-        '.dsh-synapse-view{position:relative;display:flex;width:100%;height:100%;max-height:100%;min-height:0;overflow:hidden;background:var(--dsw-alias-bg-base,#f5f7fa)}',
-        '.dsh-synapse-frame{display:block;flex:1;min-width:0;min-height:0;height:100%;border:0;-webkit-app-region:no-drag}',
+        '.dsh-synapse-view{position:relative;display:flex;flex:1 1 auto;width:100%;height:100%;max-height:100%;min-width:0;min-height:0;overflow:hidden;background:var(--dsw-alias-bg-base,#f5f7fa)}',
+        // Reserve the sidebar width without replacing the mounted iframe.
+        '.dsh-synapse-frame{display:block;flex:1 1 auto;min-width:0;min-height:0;width:100%;height:100%;border:0;-webkit-app-region:no-drag}',
+        '.dsh-synapse-view.has-turn-pane .dsh-synapse-frame{flex:none;width:calc(100% - min(460px,42%));margin-right:min(460px,42%)}',
         '.dsh-synapse-veil{position:absolute;inset:0;z-index:2;background:var(--dsw-alias-bg-base,#f5f7fa);transition:opacity .2s ease}',
         '.dsh-synapse-view.has-turn-pane .dsh-synapse-veil{right:min(460px,42%)}',
         '.dsh-synapse-veil.dsh-synapse-veil-hidden{opacity:0;pointer-events:none}',
         '.dsh-synapse-tab-gate{display:none !important}',
         '.dsh-synapse-chrome-hidden{visibility:hidden !important;pointer-events:none !important}',
+        'body:has(.dsh-synapse-view) [data-width-handle]{visibility:hidden !important;pointer-events:none !important}',
         '.dsh-synapse-composer-hidden{display:none !important}',
-        '.dsh-synapse-view.has-turn-pane .dsh-synapse-frame{margin-right:min(460px,42%)}',
-        '.dsh-synapse-turn-pane{position:absolute;top:0;right:0;bottom:0;z-index:3;display:flex;flex-direction:column;width:min(460px,42%);min-width:320px;min-height:0;max-height:100%;overflow:hidden;border-left:1px solid var(--dsw-alias-border-l2,#e7edf3);background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#172033)}',
+        '.dsh-synapse-turn-pane{--dsh-chat-content-width:100%;--dsh-composer-side-clearance:0px;position:absolute;inset:0 0 0 auto;z-index:3;display:flex;flex-direction:column;width:min(460px,42%);height:100%;min-width:320px;min-height:0;max-height:none;overflow:hidden;border-left:1px solid var(--dsw-alias-border-l2,#e7edf3);background:var(--dsw-alias-bg-base,#fff);color:var(--dsw-alias-label-primary,#172033)}',
         '.dsh-synapse-turn-pane .dsh-codex-sidechat-transcript-wrap{flex:1;min-height:0;overflow:hidden}',
         '.dsh-synapse-turn-pane .dsh-codex-sidechat-transcript{flex:1;min-height:0;overflow-y:auto;overscroll-behavior:contain;overflow-anchor:none;scrollbar-gutter:stable}',
         '.dsh-synapse-turn-pane .dsh-codex-sidechat-empty-panel{flex:1;min-height:0}',
+        '.dsh-synapse-turn-flow{flex:1;min-height:0;overflow-y:auto;padding:16px;overscroll-behavior:contain;overflow-anchor:none;scrollbar-gutter:stable}',
+        '.dsh-synapse-turn-column{min-width:0;display:flex;flex-direction:column;gap:16px}',
+        '.dsh-synapse-turn-node{min-width:0}',
         '.dsh-synapse-turn-pane-head{display:flex;align-items:center;justify-content:space-between;gap:12px;flex:none;padding:12px 14px;border-bottom:1px solid var(--dsw-alias-border-l2,#e7edf3)}',
         '.dsh-synapse-turn-pane-meta{display:flex;align-items:center;gap:8px;min-width:0}',
         '.dsh-synapse-turn-pane-badge{display:inline-flex;align-items:center;border-radius:999px;background:var(--dsw-alias-interactive-bg-hover,#eaf0fa);padding:2px 8px;color:var(--dsw-alias-state-business-primary,#3b6fd4);font-size:11px;font-weight:700}',
@@ -849,7 +1106,6 @@ window.__ModuleLoader__.load({
         '.dsh-codex-sidechat-md-fallback{white-space:pre-wrap;word-break:break-word}',
         SIDECHAT_TURN_CSS,
       ].join('\n')
-      document.head.append(style)
       const send = (type, payload) => { frame?.contentWindow?.postMessage({ source: 'dsh-synapse', type, ...payload }, location.origin) }
       let syncQueued = false
       let knownSessionIds = new Set()
@@ -864,7 +1120,7 @@ window.__ModuleLoader__.load({
           const publish = () => {
             if (frame === null) return
             const state = session.getSnapshot()
-            const text = state.partial?.blocks.filter(block => block.kind === 'text').map(block => block.text).join('\n') ?? ''
+            const text = replyTextOfSnapshot(state)
             send('synapse:live-reply', { sessionId: id, running: state.running, text })
           }
           liveUnsubscribers.set(id, session.subscribe(publish))
@@ -950,10 +1206,6 @@ window.__ModuleLoader__.load({
             turnWatch.set(null)
             return
           }
-          try { ctx.sessions.open(sessionId) } catch {
-            send('synapse:bridge-error', { message: '关联的会话已不可用' })
-            return
-          }
           turnWatch.set({
             sessionId,
             seq: Number.isInteger(event.data.seq) ? event.data.seq : undefined,
@@ -979,7 +1231,7 @@ window.__ModuleLoader__.load({
           ctx.sessions.fork({ sessionId: event.data.sessionId, atSeq, increaseTitle: false }).then(id => {
             const snapshot = ctx.sessions.list.getSnapshot()
             send('synapse:forked-session', { requestId: event.data.requestId, session: { id, title: snapshot.byId[id]?.displayTitle ?? '会话分支', parentId: snapshot.byId[id]?.parentId ?? event.data.sessionId } })
-          }).catch(() => { send('synapse:bridge-error', { message: '会话分支创建失败，请确认源会话已经完成当前轮次' }) })
+          }).catch(() => { send('synapse:bridge-error', { requestId: event.data.requestId, message: '会话分支创建失败，请确认源会话已经完成当前轮次' }) })
           return
         }
         if (event.data.type === 'synapse:archive-session') {
@@ -1061,20 +1313,37 @@ window.__ModuleLoader__.load({
       const themeObserver = typeof MutationObserver === 'undefined'
         ? null
         : new MutationObserver(() => syncTheme())
-      if (themeObserver !== null && document.body) {
-        themeObserver.observe(document.body, { attributes: true, attributeFilter: ['data-ds-dark-theme'] })
+      function installMapBridge() {
+        document.head.append(style)
+        if (themeObserver !== null && document.body) {
+          themeObserver.observe(document.body, { attributes: true, attributeFilter: ['data-ds-dark-theme'] })
+        }
+        const unsubscribeSessions = ctx.sessions.list.subscribe(syncCurrentSession)
+        const unsubscribeWorkspaces = ctx.workspaces.list.subscribe(syncCurrentSession)
+        window.addEventListener('message', onMessage)
+        window.addEventListener('keydown', onKeyDown)
+        window.addEventListener('keydown', onSpaceDown)
+        window.addEventListener('keyup', onSpaceUp)
+        if (frame !== null) syncCurrentSession()
+        return () => {
+          window.removeEventListener('message', onMessage)
+          window.removeEventListener('keydown', onKeyDown)
+          window.removeEventListener('keydown', onSpaceDown)
+          window.removeEventListener('keyup', onSpaceUp)
+          themeObserver?.disconnect()
+          unsubscribeSessions()
+          unsubscribeWorkspaces()
+          for (const unsubscribe of liveUnsubscribers.values()) unsubscribe()
+          liveUnsubscribers.clear()
+          style.remove()
+        }
       }
-      const unsubscribeSessions = ctx.sessions.list.subscribe(syncCurrentSession)
-      const unsubscribeWorkspaces = ctx.workspaces.list.subscribe(syncCurrentSession)
-      window.addEventListener('message', onMessage)
-      window.addEventListener('keydown', onKeyDown)
-      window.addEventListener('keydown', onSpaceDown)
-      window.addEventListener('keyup', onSpaceUp)
 
       // The map view: the Synapse canvas in an iframe filling the session body.
-      function SynapseMapView() {
+      function SynapseMapView(props) {
         const ref = React.useRef(null)
         const veilRef = React.useRef(null)
+        const [frameReady, setFrameReady] = React.useState(false)
         const watch = React.useSyncExternalStore(listener => turnWatch.subscribe(listener), () => turnWatch.get())
         React.useEffect(() => {
           frame = ref.current
@@ -1131,6 +1400,11 @@ window.__ModuleLoader__.load({
             onLoad: event => {
               const element = event.currentTarget
               injectCanvasStyle(element?.contentDocument)
+              // Keep the veil state declarative. The watch-turn update causes
+              // this component to render again; an imperative-only class on
+              // the veil would otherwise be removed by React and cover the
+              // already-rendered map.
+              setFrameReady(true)
               syncCurrentSession()
               // Sent from the element, not the `frame` binding: a cached frame
               // can finish loading before this effect has run.
@@ -1140,13 +1414,27 @@ window.__ModuleLoader__.load({
               )
             },
           }),
-          h('div', { ref: veilRef, className: 'dsh-synapse-veil' }),
-          watch ? h(SynapseTurnPane, {
+          h('div', { ref: veilRef, className: `dsh-synapse-veil${frameReady ? ' dsh-synapse-veil-hidden' : ''}` }),
+          watch ? h(TurnPaneErrorBoundary, {
+            key: `${watch.sessionId}:${watch.seq ?? ''}:${watch.turnIndex ?? ''}`,
+            onClose: () => turnWatch.set(null),
+          }, h(SynapseTurnPane, {
             watch,
             ctx,
             onClose: () => turnWatch.set(null),
             onOpenInDialog: openTurnInDialog,
-          }) : null,
+            useChat: props.useChat,
+            useChatNode: props.useChatNode,
+            useSession: props.useSession,
+            useSessions: props.useSessions,
+            renderSlot: props.renderSlot,
+            sessionId: props.sessionId,
+            openFile: props.openFile,
+            forkAt: props.forkAt,
+            fileMentions: props.fileMentions,
+            loadImage: props.loadImage,
+            loadThrough: props.loadThrough,
+          })) : null,
         )
       }
 
@@ -1188,17 +1476,7 @@ window.__ModuleLoader__.load({
         order: 1000,
       }, SynapseTabGate)), 'synapse: tab placement')
 
-      ctx.effect(() => () => {
-        window.removeEventListener('message', onMessage)
-        window.removeEventListener('keydown', onKeyDown)
-        window.removeEventListener('keydown', onSpaceDown)
-        window.removeEventListener('keyup', onSpaceUp)
-        themeObserver?.disconnect()
-        unsubscribeSessions()
-        unsubscribeWorkspaces()
-        for (const unsubscribe of liveUnsubscribers.values()) unsubscribe()
-        style.remove()
-      }, 'synapse: web workspace switch')
+      ctx.effect(installMapBridge, 'synapse: web workspace switch')
     }
     return module.exports
   },

@@ -7,6 +7,8 @@
  * it only reads — and bails out as soon as a row's own props are found.
  */
 
+import { isSessionPinned, type SessionPin } from './session-pins.ts'
+
 export type RowKind = 'workspace' | 'session'
 
 export interface RowInfo {
@@ -82,7 +84,10 @@ export function rowInfo(el: Element): RowInfo | undefined {
  * The dataset attributes feed the CSS badges and let the menu resolve a row
  * without walking the fiber again.
  */
-export function tagRows(state: { pinnedWorkspaces: string[]; pinnedSessions: string[]; unreadSessions: string[] }): void {
+export function tagRows(
+  state: { pinnedWorkspaces: string[]; pinnedSessions: SessionPin[]; unreadSessions: string[] },
+  workspaceForSession: (sessionId: string) => string | undefined = () => undefined,
+): void {
   for (const row of document.querySelectorAll<HTMLElement>('[role="treeitem"]')) {
     const info = rowInfo(row)
     if (info === undefined) continue
@@ -93,7 +98,11 @@ export function tagRows(state: { pinnedWorkspaces: string[]; pinnedSessions: str
       continue
     }
     row.dataset.dshSessionId = info.id
-    row.dataset.dshPinned = state.pinnedSessions.includes(info.id) ? 'true' : 'false'
+    row.dataset.dshPinned = isSessionPinned(
+      state.pinnedSessions,
+      workspaceForSession(info.id),
+      info.id,
+    ) ? 'true' : 'false'
     row.dataset.dshUnread = state.unreadSessions.includes(info.id) ? 'true' : 'false'
   }
 }

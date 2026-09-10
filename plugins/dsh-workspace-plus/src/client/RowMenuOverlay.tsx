@@ -3,8 +3,8 @@ import { Button, Input, Modal, Toast, type MenuEntry } from '@just-genius/dsh-pl
 import type { ClientContext } from '@just-genius/dsh-plugin-runtime/client'
 import {
   archiveSession,
+  copySessionReference,
   copyText,
-  deepLink,
   findSession,
   findWorkspace,
   forkSession,
@@ -16,14 +16,31 @@ import {
   removeWorkspace,
   renameSession,
   renameWorkspace,
+  syncPinnedSessions,
+  workspaceIdForSession,
 } from './actions.ts'
 import { PROJECT_PATH } from '../shared.ts'
 import { postJson } from './http.ts'
 import { refreshBindings } from './bindings.ts'
-import { getMenuState, isEnabled, setPinnedSessions, setPinnedWorkspaces, setUnreadSessions, subscribeMenuState, toggleId, type FeatureKey } from './features.ts'
+import {
+  getMenuState,
+  isEnabled,
+  setPinnedSessions,
+  setPinnedWorkspaces,
+  setUnreadSessions,
+  subscribeMenuState,
+  toggleId,
+  type FeatureKey,
+} from './features.ts'
 import type { WorkspacePlusKey } from './locales.ts'
 import { RowMenu, type MenuAnchor } from './RowMenu.tsx'
 import { rowInfo, tagRows, type RowInfo } from './rows.ts'
+import {
+  isSessionPinned,
+  scopeSessionPins,
+  sessionPinsEqual,
+  setSessionPinned,
+} from './session-pins.ts'
 
 export interface RowMenuOverlayInjected {
   t?: (key: WorkspacePlusKey) => string
@@ -61,24 +78,42 @@ export function RowMenuOverlay({ t, ctx }: RowMenuOverlayInjected) {
 
   const close = useCallback(() => { setOpen(null) }, [])
 
+  const updateRows = useCallback(() => {
+    const current = getMenuState()
+    if (ctx === undefined) {
+      tagRows(current)
+      return
+    }
+    const resolveWorkspace = (sessionId: string): string | undefined => {
+      return workspaceIdForSession(ctx, sessionId)
+    }
+    const scoped = scopeSessionPins(current.pinnedSessions, resolveWorkspace)
+    if (!sessionPinsEqual(scoped, current.pinnedSessions)) {
+      setPinnedSessions(scoped)
+      return
+    }
+    tagRows(current, resolveWorkspace)
+    void syncPinnedSessions(ctx, scoped).catch(() => undefined)
+  }, [ctx])
+
   // Re-tag rows whenever pin/unread state or the DOM changes, so the CSS
-  // badges follow the user's actions without a full reload.
+  // badges and workspace-local session order stay current without a reload.
   useEffect(() => {
-    tagRows(state)
-  }, [state])
+    updateRows()
+  }, [state, updateRows])
 
   useEffect(() => {
     let raf = 0
     const observer = new MutationObserver(() => {
       window.cancelAnimationFrame(raf)
-      raf = window.requestAnimationFrame(() => { tagRows(getMenuState()) })
+      raf = window.requestAnimationFrame(updateRows)
     })
     observer.observe(document.body, { childList: true, subtree: true })
     return () => {
       window.cancelAnimationFrame(raf)
       observer.disconnect()
     }
-  }, [])
+  }, [updateRows])
 
   useEffect(() => {
     if (ctx === undefined) return
@@ -250,12 +285,17 @@ function sessionEntries(
 ): MenuEntry[] {
   const entries: MenuEntry[] = []
   const state = getMenuState()
-  const pinned = state.pinnedSessions.includes(row.id)
+  const workspaceId = workspaceIdForSession(ctx, row.id)
+  const pinned = isSessionPinned(state.pinnedSessions, workspaceId, row.id)
   const unread = state.unreadSessions.includes(row.id)
   const session = findSession(ctx, row.id)
 
   if (on(flags, 'sessionPin')) {
-    entries.push({ id: 'pin', label: pinned ? t('menu.unpin') : t('menu.pin') })
+    entries.push({
+      id: 'pin',
+      label: pinned ? t('menu.unpin') : t('menu.pin'),
+      disabled: workspaceId === undefined,
+    })
   }
   if (on(flags, 'sessionRename')) {
     entries.push({ id: 'rename', label: t('menu.rename') })
@@ -269,14 +309,8 @@ function sessionEntries(
   if (on(flags, 'sessionFork')) {
     entries.push({ id: 'fork', label: t('menu.fork') })
   }
-  if (on(flags, 'sessionCopyLink')) {
-    entries.push({ id: 'copyLink', label: t('menu.copyLink') })
-  }
-  if (on(flags, 'sessionCopyTitle')) {
-    entries.push({ id: 'copyTitle', label: t('menu.copyTitle') })
-  }
-  if (on(flags, 'sessionOpenWindow')) {
-    entries.push({ id: 'openWindow', label: t('menu.openWindow') })
+  if (on(flags, 'sessionCopyReference')) {
+    entries.push({ id: 'copyReference', label: t('menu.copyReference') })
   }
   if (on(flags, 'sessionOpenFolder')) {
     entries.push({
@@ -372,10 +406,21 @@ async function dispatch(
   const session = findSession(ctx, row.id)
   switch (id) {
     case 'pin': {
-      const pinned = !state.pinnedSessions.includes(row.id)
-      setPinnedSessions(toggleId(state.pinnedSessions, row.id))
-      await pinSession(ctx, row.id, pinned)
-      flash(pinned ? 'toast.pinned' : 'toast.unpinned')
+      const workspaceId = workspaceIdForSession(ctx, row.id)
+      if (workspaceId === undefined) return
+      const scoped = scopeSessionPins(
+        state.pinnedSessions,
+        (sessionId) => workspaceIdForSession(ctx, sessionId),
+      )
+      const wasPinned = isSessionPinned(scoped, workspaceId, row.id)
+      setPinnedSessions(setSessionPinned(
+        scoped,
+        workspaceId,
+        row.id,
+        !wasPinned,
+      ))
+      await pinSession(ctx, row.id, !wasPinned)
+      flash(wasPinned ? 'toast.unpinned' : 'toast.pinned')
       return
     }
     case 'rename': {
@@ -405,16 +450,8 @@ async function dispatch(
       await forkSession(ctx, row.id)
       return
     }
-    case 'copyLink': {
-      flash((await copyText(deepLink(row.id))) ? 'toast.linkCopied' : 'toast.copyFailed')
-      return
-    }
-    case 'copyTitle': {
-      flash((await copyText(row.title)) ? 'toast.titleCopied' : 'toast.copyFailed')
-      return
-    }
-    case 'openWindow': {
-      window.open(deepLink(row.id), '_blank')
+    case 'copyReference': {
+      flash((await copySessionReference(ctx, row.id)) ? 'toast.referenceCopied' : 'toast.copyFailed')
       return
     }
     case 'openFolder': {

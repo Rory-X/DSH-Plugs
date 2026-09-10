@@ -121,8 +121,6 @@ const SETTINGS_LABELS: Record<FeatureKey, WorkspacePlusKey> = {
   sessionUnread: 'settings.sessionUnread',
   sessionArchive: 'settings.sessionArchive',
   sessionFork: 'settings.sessionFork',
-  sessionCopyLink: 'settings.sessionCopyLink',
-  sessionCopyTitle: 'settings.sessionCopyTitle',
-  sessionOpenWindow: 'settings.sessionOpenWindow',
+  sessionCopyReference: 'settings.sessionCopyReference',
   sessionOpenFolder: 'settings.sessionOpenFolder',
 }

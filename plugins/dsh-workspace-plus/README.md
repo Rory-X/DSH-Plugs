@@ -28,14 +28,12 @@ Project / 工作区行（双击或右键）：
 
 Chat / 会话行（双击或右键）：
 
-- 置顶 / 取消置顶
+- 在所属工作区内按会话独立置顶 / 取消置顶（多个置顶会话形成工作区顶部区域）
 - 重命名
 - 标记未读 / 已读
 - 归档会话
 - 分叉会话
-- 复制会话链接
-- 复制会话标题
-- 在新窗口中打开
+- 复制会话引用（会话事件日志的绝对路径，Agent 可直接读取）
 - 打开所在目录
 
 每一项都能在 DSH 设置 → 通用设置 → 工作区增强 里单独关掉。
@@ -62,5 +60,5 @@ dsh plugin --profile web add ./plugins/dsh-workspace-plus
 
 - “在资源管理器中打开”由 Host 调用系统文件管理器：Windows 用资源管理器，macOS 用 Finder，Linux 自动选择 `xdg-open` / `gio` / 常见文件管理器。路由带 Host/Origin 信任围栏。
 - 置顶和未读状态存在浏览器 localStorage（`dsh-workspace-plus:v1`）。
-- 新窗口打开依赖 `?session=<id>` 深链。
+- “复制会话引用”通过共享的 `sessionPersistence.locate()` 获取当前后端实际存在的日志路径，不会由浏览器猜测 DSH Home。
 - 从 `dsh-multi-repo` 升级：首次加载会把 `~/.dsh/multi-repo/projects.json` 复制成新存储，旧文件保留不动。

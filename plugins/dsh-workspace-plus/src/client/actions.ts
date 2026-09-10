@@ -6,8 +6,14 @@ import type {
 } from '@just-genius/dsh-plugin-runtime/client'
 import { getSessions, getWorkspaces } from '@just-genius/dsh-plugin-runtime/client'
 import { writeClipboard } from '@just-genius/dsh-plugin-ui'
-import { OPEN_PATH, type WorkspaceView } from '../shared.ts'
+import {
+  OPEN_PATH,
+  SESSION_REFERENCE_PATH,
+  type SessionReferencePayload,
+  type WorkspaceView,
+} from '../shared.ts'
 import { postJson } from './http.ts'
+import { planSessionPinMoves, type SessionPin } from './session-pins.ts'
 
 /**
  * Row ids arrive as plain strings: they are read off React fiber props and
@@ -55,13 +61,6 @@ export async function openInExplorer(path: string): Promise<void> {
 
 export async function copyText(text: string): Promise<boolean> {
   return await writeClipboard(text)
-}
-
-/** Deep link used by "copy link" and "open in new window". */
-export function deepLink(sessionId: string): string {
-  const url = new URL(window.location.href)
-  url.searchParams.set('session', sessionId)
-  return url.toString()
 }
 
 export async function renameWorkspace(ctx: ClientCtx, id: string, title: string): Promise<void> {
@@ -114,6 +113,43 @@ export async function pinSession(
     asSessionId(sessionId),
     asSessionId(String(first)),
   )
+}
+
+const pinSyncs = new WeakMap<object, Promise<void>>()
+
+/** Keep every workspace's one pinned session before its other sessions. */
+export function syncPinnedSessions(ctx: ClientCtx, pins: readonly SessionPin[]): Promise<void> {
+  const owner = ctx as object
+  const active = pinSyncs.get(owner)
+  if (active !== undefined) return active
+  const workspaces = workspacesOf(ctx).list.getSnapshot().items.map((workspace: WorkspaceView) => ({
+    workspaceId: String(workspace.workspaceId),
+    sessionIds: workspace.sessionIds.map(String),
+  }))
+  const task = (async () => {
+    for (const move of planSessionPinMoves(workspaces, pins)) {
+      await workspacesOf(ctx).insertSessionBefore(
+        asWorkspaceId(move.workspaceId),
+        asSessionId(move.sessionId),
+        asSessionId(move.beforeSessionId),
+      )
+    }
+  })()
+  const tracked = task.finally(() => {
+    if (pinSyncs.get(owner) === tracked) pinSyncs.delete(owner)
+  })
+  pinSyncs.set(owner, tracked)
+  return tracked
+}
+
+/** Copy the physical DSH event-log path so an agent can read the session. */
+export async function copySessionReference(ctx: ClientCtx, sessionId: string): Promise<boolean> {
+  const session = findSession(ctx, sessionId)
+  const reference = await postJson<SessionReferencePayload>(SESSION_REFERENCE_PATH, {
+    sessionId,
+    cwd: session?.cwd,
+  })
+  return await copyText(reference.path)
 }
 
 export async function archiveSession(ctx: ClientCtx, sessionId: string): Promise<void> {

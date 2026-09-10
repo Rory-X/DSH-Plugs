@@ -70,6 +70,18 @@ test('the last turn runs to the end of the log', () => {
   assert.deepEqual(detail.steps.map(step => step.text), ['第二答', '补充'])
 })
 
+test('uses the card turn index when its durable source sequence is missing', () => {
+  const events = [
+    userMessage(1, '第一问'),
+    assistantMessage(2, '第一答'),
+    userMessage(3, '第二问'),
+    assistantMessage(4, '第二答'),
+  ]
+  const detail = buildTurnDetail(events, null, 1)
+  assert.equal(detail.question, '第二问')
+  assert.deepEqual(detail.steps.map(step => step.text), ['第二答'])
+})
+
 test('survives a missing or unreadable log', () => {
   assert.deepEqual(buildTurnDetail(undefined, 1), { question: null, steps: [], process: [] })
   assert.deepEqual(buildTurnDetail([], 1), { question: null, steps: [], process: [] })
@@ -186,11 +198,15 @@ test('the client falls back to the card summary when the detail read fails', asy
   assert.match(load, /historyBySession\.set\(`\$\{thread\.dshSessionId\}:\$\{target\.id\}`, null\)/)
   // The inspector and the thread view both read the nullable detail and fall
   // back to the card fields when it is null.
-  const inspector = source.slice(source.indexOf('function inspectorReply'), source.indexOf('function renderThread'))
+  const inspector = source.slice(source.indexOf('function lastAssistantText'), source.indexOf('function renderThread'))
   assert.match(inspector, /detail\?\.steps \?\? \[\]/)
   assert.match(inspector, /card\.answer\?\.text/)
   assert.match(inspector, /const pending = card\.answer\?\.pending === true/)
   assert.doesNotMatch(inspector, /live\?\.running === true/)
+  assert.match(inspector, /texts\[texts\.length - 1\]/)
+  assert.match(inspector, /正在回复/)
+  assert.doesNotMatch(inspector, /正在读取完整内容/)
+  assert.doesNotMatch(inspector, /等待助手回复/)
   const thread = source.slice(source.indexOf('function renderThread'), source.indexOf('function render()'))
   assert.match(thread, /card\.turn\.answer/)
 })
@@ -228,7 +244,7 @@ test('reading events never trips the cordis inject guard', async () => {
 
 test('inspector keeps settled card text while a later turn is live', async () => {
   const source = await readFile(new URL('../app.js', import.meta.url), 'utf8')
-  const start = source.indexOf('function inspectorReply')
+  const start = source.indexOf('function lastAssistantText')
   const end = source.indexOf('function inspectorNoteBody')
   const context = {
     state: {
@@ -260,4 +276,39 @@ test('inspector keeps settled card text while a later turn is live', async () =>
   })
   assert.equal(live.pending, true)
   assert.equal(live.answerText, '')
+})
+
+test('inspector uses only the last assistant markdown from a multi-step turn', async () => {
+  const source = await readFile(new URL('../app.js', import.meta.url), 'utf8')
+  const start = source.indexOf('function lastAssistantText')
+  const end = source.indexOf('function inspectorNoteBody')
+  const context = {
+    state: {
+      workspace: { threads: [{ id: 't1', dshSessionId: 's1' }] },
+      liveReplies: new Map(),
+      historyBySession: new Map(),
+    },
+    historyForCard: () => ({
+      steps: [
+        { kind: 'assistant', text: '我先看看。' },
+        { kind: 'assistant', text: '测试通过了。' },
+      ],
+      process: [],
+    }),
+    isSessionLabelQuestion: () => false,
+  }
+  vm.createContext(context)
+  vm.runInContext(source.slice(start, end), context)
+  assert.equal(context.lastAssistantText(context.historyForCard().steps, '摘要'), '测试通过了。')
+  assert.equal(context.lastAssistantText([], '卡片摘要'), '卡片摘要')
+  const reply = context.inspectorReply({
+    id: 't1:turn:1',
+    dshThreadId: 't1',
+    question: '跑一下测试',
+    answer: { kind: 'assistant', text: '卡片摘要', pending: false },
+    error: null,
+    sourceSeq: 1,
+  })
+  assert.equal(reply.pending, false)
+  assert.equal(reply.answerText, '测试通过了。')
 })

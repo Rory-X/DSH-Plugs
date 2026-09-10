@@ -7,6 +7,9 @@ export const PROJECT_PATH = '/dsh-workspace-plus/binding'
 /** HTTP path: reveal a path in the OS file manager (Explorer / Finder / xdg-open). */
 export const OPEN_PATH = '/dsh-workspace-plus/open-in-explorer'
 
+/** HTTP path: resolve one session's physical event-log artifact. */
+export const SESSION_REFERENCE_PATH = '/dsh-workspace-plus/session-reference'
+
 // Branded ids, re-exported through the shared runtime boundary so both halves
 // share one source of truth for the platform's identity types.
 import type { SessionId, WorkspaceId } from '@just-genius/dsh-plugin-runtime/client'
@@ -41,6 +44,10 @@ export interface WorkspaceBinding {
 export interface BindingListPayload {
   root: string
   bindings: WorkspaceBinding[]
+}
+
+export interface SessionReferencePayload {
+  path: string
 }
 
 /**

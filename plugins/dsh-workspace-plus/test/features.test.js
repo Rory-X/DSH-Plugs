@@ -51,6 +51,10 @@ test('the destructive delete actions are not offered at all', () => {
     false,
     'the disk-deleting session action is gone',
   )
+  assert.equal(features.FEATURE_KEYS.includes('sessionCopyLink'), false)
+  assert.equal(features.FEATURE_KEYS.includes('sessionCopyTitle'), false)
+  assert.equal(features.FEATURE_KEYS.includes('sessionOpenWindow'), false)
+  assert.equal(features.FEATURE_KEYS.includes('sessionCopyReference'), true)
 })
 
 test('a corrupt stored blob falls back to all-on instead of all-off', () => {
@@ -75,12 +79,27 @@ test('a stored partial flag set keeps unlisted features on', () => {
 
 test('turning one switch off leaves the pin and unread lists intact', () => {
   features.setPinnedWorkspaces(['ws-1'])
+  features.setPinnedSessions([{ workspaceId: 'ws-1', sessionId: 's-1' }])
   features.setUnreadSessions(['s-1'])
   features.setFeature('sessionFork', false)
 
   assert.equal(features.isEnabled('sessionFork'), false)
   assert.deepEqual(features.getMenuState().pinnedWorkspaces, ['ws-1'])
+  assert.deepEqual(features.getMenuState().pinnedSessions, [
+    { workspaceId: 'ws-1', sessionId: 's-1' },
+  ])
   assert.deepEqual(features.getMenuState().unreadSessions, ['s-1'])
+})
+
+test('legacy pinned session ids load in a migratable form', () => {
+  installStorage({
+    'dsh-workspace-plus:v1': JSON.stringify({ pinnedSessions: ['s-1'] }),
+  })
+  return import(`../src/client/features.ts?legacy-pins=${Math.random()}`).then((m) => {
+    assert.deepEqual(m.getMenuState().pinnedSessions, [
+      { workspaceId: '', sessionId: 's-1' },
+    ])
+  })
 })
 
 test('toggling a switch persists across a reload', () => {

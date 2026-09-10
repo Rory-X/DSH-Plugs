@@ -43,6 +43,7 @@
   "scripts": {
     "build": "tsdown -c tsdown.config.ts && tsdown -c tsdown.client.config.ts",
     "watch": "tsdown -c tsdown.config.ts --watch & tsdown -c tsdown.client.config.ts --watch",
+    "test": "node --test test/*.test.js",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf lib"
   },

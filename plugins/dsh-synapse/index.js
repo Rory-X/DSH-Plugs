@@ -98,6 +98,12 @@ export class WorkspaceStore {
         const existing = workspace.threads.find(item => item.dshSessionId === sessionId)
         if (existing !== undefined) {
           existing.parentId ??= parent.id
+          if (typeof parent.dshSessionId === 'string' && parent.dshSessionId !== '') existing.sourceParentSessionId ??= parent.dshSessionId
+          // The browser knows the exact turn the user branched from; DSH's own
+          // seedLength is a coarser cut (and absent on old forks), so prefer
+          // the anchor whenever the browser supplies one.
+          if (typeof input?.anchorCardId === 'string' && input.anchorCardId !== '') existing.anchorCardId = input.anchorCardId
+          if (Number.isSafeInteger(input?.sourceAnchorSeq)) existing.sourceAnchorSeq = input.sourceAnchorSeq
           if (typeof input?.title === 'string' && input.title.trim() !== '') existing.title = requiredText(input.title, MAX_TITLE_LENGTH, 'title')
           if (typeof input?.dshSessionTitle === 'string') existing.dshSessionTitle = input.dshSessionTitle.slice(0, MAX_TITLE_LENGTH)
           existing.updatedAt = now
@@ -116,6 +122,13 @@ export class WorkspaceStore {
         now,
         order: workspace.threads.length,
       })
+      // Persist the branch point on the server. localStorage anchors die with
+      // the browser profile, and a lost anchor drops the branch to the canvas
+      // origin where it overlaps the parent chain instead of sitting beside
+      // the turn it left.
+      if (typeof input?.anchorCardId === 'string' && input.anchorCardId !== '') thread.anchorCardId = input.anchorCardId
+      if (Number.isSafeInteger(input?.sourceAnchorSeq)) thread.sourceAnchorSeq = input.sourceAnchorSeq
+      if (typeof parent.dshSessionId === 'string' && parent.dshSessionId !== '') thread.sourceParentSessionId = parent.dshSessionId
       workspace.threads.push(thread)
       workspace.updatedAt = now
       return structuredClone(thread)
@@ -182,6 +195,36 @@ export class WorkspaceStore {
       const { workspace, thread } = this.locateThread(threadId)
       if (input?.title !== undefined) thread.title = requiredText(input.title, MAX_TITLE_LENGTH, 'title')
       if (input?.position !== undefined) thread.position = positionOf(input.position)
+      thread.updatedAt = new Date().toISOString()
+      workspace.updatedAt = thread.updatedAt
+      return structuredClone(thread)
+    })
+  }
+
+  /**
+   * Rename one conversation card, or restore its automatic title.
+   *
+   * The custom title lives beside the projected question on the turn: card
+   * projection rewrites `question` from the DSH log but never touches
+   * `title`, so a rename survives every later sync. An empty title deletes
+   * the field and the card falls back to the auto-derived question.
+   *
+   * `cardKey` is the card's stable address: its DSH sequence number, or
+   * `i<index>` for a turn without one (a manual note).
+   */
+  async updateCardTitle(threadId, cardKey, title) {
+    if (typeof title !== 'string') throw new InputError('title 必须是文本')
+    const text = title.trim()
+    if (text.length > MAX_TITLE_LENGTH) throw new InputError('title 超过长度限制')
+    return this.mutate(() => {
+      const { workspace, thread } = this.locateThread(threadId)
+      const turns = thread.turns ?? []
+      const turn = /^\d+$/.test(cardKey)
+        ? turns.find(item => item?.seq === Number(cardKey))
+        : /^i\d+$/.test(cardKey) ? turns[Number(cardKey.slice(1))] : undefined
+      if (turn === undefined || turn === null || typeof turn !== 'object') throw new NotFoundError('卡片不存在')
+      if (text === '') delete turn.title
+      else turn.title = text
       thread.updatedAt = new Date().toISOString()
       workspace.updatedAt = thread.updatedAt
       return structuredClone(thread)
@@ -720,7 +763,97 @@ function normalizeState(value) {
   // canvas shows only real user questions.
   if (state.version === 5 && rewriteSessionLabelQuestions(state.workspaces)) migrated = true
   if (state.version === 5 && dropInjectedTurns(state.workspaces)) migrated = true
+  // Forks recorded before the server kept a branch point lose it whenever the
+  // browser's localStorage anchor is gone. Derive a durable anchor from the
+  // child's own first turn: it is the first card after the inherited prefix,
+  // so the parent turn is the last one that ends at or before it.
+  if (state.version === 5 && backfillBranchAnchors(state.workspaces)) migrated = true
   return { state, migrated }
+}
+
+/**
+ * Give every branch a durable anchor card when it does not have one yet.
+ *
+ * A fork created before the server persisted `anchorCardId` (or one whose
+ * browser anchor was lost) can still be placed: the child's first own turn
+ * starts right after the inherited prefix, so the branch point is the last
+ * parent turn that finishes at or before that turn begins.
+ *
+ * Never invents an anchor for a branch with no parent, no parent turns, or no
+ * child turn to compare against — such a branch stays unanchored and the
+ * canvas falls back to a plain lane instead of a guessed position.
+ * @param workspaces - mutable normalized workspaces.
+ * @returns whether any thread gained an anchor.
+ */
+function backfillBranchAnchors(workspaces) {
+  let changed = false
+  for (const workspace of workspaces) {
+    const threads = workspace.threads ?? []
+    const byId = new Map(threads.map(thread => [thread.id, thread]))
+    for (const thread of threads) {
+      if (thread.parentId === null || typeof thread.parentId !== 'string') continue
+      if (typeof thread.anchorCardId === 'string' && thread.anchorCardId !== '') continue
+      const parent = byId.get(thread.parentId)
+      if (parent === undefined) continue
+      const parentTurns = Array.isArray(parent.turns) ? parent.turns : []
+      const childTurns = Array.isArray(thread.turns) ? thread.turns : []
+      if (parentTurns.length === 0 || childTurns.length === 0) continue
+      // The branch was cut at the end of a turn, so the anchor is the latest
+      // parent turn the child inherited. Two signals, in order of trust, and
+      // they resolve the same way the canvas does so a reload never moves a
+      // branch that the live view already placed.
+      const seed = Number.isSafeInteger(thread.sourceSeedLength) && thread.sourceSeedLength >= 0 ? thread.sourceSeedLength : undefined
+      const parentEnds = parentTurns.map(endOfTurn).filter(seq => seq !== undefined)
+      const childSeqs = childTurns.map(startOfTurn).filter(seq => seq !== undefined)
+      if (seed !== undefined && parentEnds.length > 0) {
+        // A durable boundary that lands inside the parent's history names the
+        // branch point exactly.
+        const bySeed = parentTurns.filter(turn => {
+          const end = endOfTurn(turn)
+          return end !== undefined && end <= seed
+        })
+        const hit = bySeed.reduce((latest, turn) => (latest === undefined || endOfTurn(turn) > endOfTurn(latest) ? turn : latest), undefined)
+        if (hit !== undefined) {
+          thread.anchorCardId = `${parent.id}:turn:${Number.isSafeInteger(hit.seq) ? hit.seq : 'i0'}`
+          thread.sourceAnchorSeq = endOfTurn(hit)
+          changed = true
+          continue
+        }
+        // A seed of 0 means "inherited nothing". Trust it only when the child
+        // continues the parent's numbering; a child numbered below the parent's
+        // first turn re-counts from its own origin and its 0 is noise.
+        const earliest = Math.min(...parentTurns.map(startOfTurn).filter(seq => seq !== undefined))
+        const continuesParent = childSeqs.length === 0 || Math.min(...childSeqs) > earliest
+        if (continuesParent || seed > Math.max(...parentEnds)) continue
+      }
+      // No usable boundary: the child's first own turn begins right after the
+      // inherited prefix, so every parent turn starting at or before it is what
+      // this branch copied. The last such turn is the branch point.
+      if (childSeqs.length === 0) continue
+      const childStart = Math.min(...childSeqs)
+      const inherited = parentTurns.filter(turn => {
+        const start = startOfTurn(turn)
+        return start !== undefined && start <= childStart
+      })
+      const anchor = inherited.reduce((latest, turn) => (latest === undefined || endOfTurn(turn) > endOfTurn(latest) ? turn : latest), undefined)
+      if (anchor === undefined) continue
+      thread.anchorCardId = `${parent.id}:turn:${Number.isSafeInteger(anchor.seq) ? anchor.seq : 'i0'}`
+      thread.sourceAnchorSeq = endOfTurn(anchor)
+      changed = true
+    }
+  }
+  return changed
+}
+
+/** Sequence a stored turn card starts at (its question). */
+function startOfTurn(turn) {
+  return turn !== null && typeof turn === 'object' && Number.isSafeInteger(turn.seq) ? turn.seq : undefined
+}
+
+/** Sequence a stored turn card ends at (its answer, else its question). */
+function endOfTurn(turn) {
+  if (turn === null || typeof turn !== 'object') return undefined
+  return Number.isSafeInteger(turn.answerSeq) ? turn.answerSeq : startOfTurn(turn)
 }
 
 /**
@@ -1278,7 +1411,7 @@ async function readSessionEvents(ctx, sessionId) {
  * session instead of from the canvas metadata. `events` are the session's
  * committed events in seq order; `turnSeq` is the turn's opening user event.
  */
-export function buildTurnDetail(events, turnSeq) {
+export function buildTurnDetail(events, turnSeq, turnIndex) {
   if (!Array.isArray(events)) return { question: null, steps: [], process: [] }
   const ordered = [...events].sort((left, right) => left.seq - right.seq)
   // Only a REAL user question opens a turn. DSH emits runtime-context
@@ -1288,9 +1421,16 @@ export function buildTurnDetail(events, turnSeq) {
   const isTurnStart = event => event.type === 'user/message' && !isRuntimeContextText(contentText(event.data?.content))
   let start = ordered.findIndex(event => event.seq === turnSeq && isTurnStart(event))
   if (start === -1) {
-    // Fall back to the nth real turn when the durable seq is unavailable
-    // (legacy data, or a turn discovered before its event was committed).
-    start = ordered.findIndex(isTurnStart)
+    // Fall back to the card's zero-based turn index when the durable seq is
+    // unavailable (legacy data, or a turn discovered before its event was
+    // committed). Only fall back to the first turn when neither key exists.
+    const starts = ordered.reduce((indices, event, index) => {
+      if (isTurnStart(event)) indices.push(index)
+      return indices
+    }, [])
+    start = Number.isInteger(turnIndex) && turnIndex >= 0 && turnIndex < starts.length
+      ? starts[turnIndex]
+      : starts[0] ?? -1
   }
   if (start === -1) return { question: null, steps: [], process: [] }
   const end = ordered.findIndex((event, index) => index > start && isTurnStart(event))
@@ -1550,6 +1690,8 @@ export function apply(ctx, config) {
       }
       const branch = /^\/synapse\/api\/threads\/([0-9a-f-]+)\/branch$/i.exec(path)
       if (branch !== null && req.method === 'POST') return sendJson(res, 201, { thread: await store.branch(branch[1], await readJson(req)) })
+      const cardTitle = /^\/synapse\/api\/threads\/([0-9a-f-]+)\/cards\/(\d+|i\d+)$/i.exec(path)
+      if (cardTitle !== null && req.method === 'PATCH') return sendJson(res, 200, { thread: await store.updateCardTitle(cardTitle[1], cardTitle[2], (await readJson(req))?.title) })
       if (path === '/synapse/api/sessions/sync' && req.method === 'POST') { const body = await readJson(req); return sendJson(res, 200, { workspaces: await store.syncSessions(body.sessions, body.removedSessionIds) }) }
       // Detail on demand: the canvas stores only card summaries, so the full
       // turn (every assistant step plus tool arguments and outputs) is read
@@ -1561,7 +1703,13 @@ export function apply(ctx, config) {
         const sessionId = typeof body.sessionId === 'string' ? body.sessionId : ''
         const events = await readSessionEvents(ctx, sessionId)
         if (events === null) return sendJson(res, 404, { error: '会话已不可用' })
-        return sendJson(res, 200, { detail: buildTurnDetail(events, Number.isSafeInteger(body.seq) ? body.seq : null) })
+        return sendJson(res, 200, {
+          detail: buildTurnDetail(
+            events,
+            Number.isSafeInteger(body.seq) ? body.seq : null,
+            Number.isSafeInteger(body.turnIndex) ? body.turnIndex : null,
+          ),
+        })
       }
       const messages = /^\/synapse\/api\/threads\/([0-9a-f-]+)\/messages$/i.exec(path)
       if (messages !== null && req.method === 'POST') return sendJson(res, 201, { thread: await store.addMessage(messages[1], (await readJson(req)).text) })
