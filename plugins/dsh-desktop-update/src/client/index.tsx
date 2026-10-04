@@ -140,11 +140,15 @@ export function apply(ctx: ClientContext): void {
   // Bound on this fiber: disposal, invalidation subscriptions, and the
   // initial Host read are owned by the binder's ctx.effect.
   const scope = getSettingsScope(ctx).bind<DesktopUpdateConfig>({ namespace: SETTINGS_NS })
-  ctx.slots.inject('settings.plugin.item', () =>
+  // DSH 0.1.6 moved plugin configuration from the Settings page to the
+  // sidebar Plugins page: a bundle's configuration registers into
+  // `plugins.bundle.config`, keyed by the bundle's package name (must match
+  // package.json `name`), and renders on the bundle's own page.
+  ctx.slots.inject('plugins.bundle.config', () =>
     ctx.slots.register(
       {
-        name: 'settings.plugin.item',
-        key: SETTINGS_NS,
+        name: 'plugins.bundle.config',
+        key: '@just-genius/dsh-desktop-update',
         // Plugin-owned dictionary namespace; widen as with the free-form
         // locale register overload above.
         locale: NS as never,

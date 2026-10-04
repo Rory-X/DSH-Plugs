@@ -20,7 +20,7 @@ Leader-plans / subagent-executes orchestration, **off until you run `/flow`**. O
 
 ### [@just-genius/dsh-workspace-plus](plugins/dsh-workspace-plus)
 
-Workspace enhancement. **Multi-folder workspaces** (Codex-style, no git scan): add folders one by one, pick one as the **primary** — the official workspace, session cwd, and workspace-write scope — while the rest stay readable and coordinatable, with the folder list injected into the system prompt. Plus double-click / right-click menus on workspace and session rows — pin, rename, unread, archive, fork, open folder. Bindings live in `~/.dsh/workspace-plus/bindings.json`. Session menus do not offer permanent delete.
+Sidebar enhancement that only ADDS to the official UI. A **pinned area** above the sidebar list where both **projects and sessions** can be pinned — session pins are DSH's own `pinnedSessionIds`, so the panel and the official row button are one write, while project pins live in `~/.dsh/workspace-plus/pins.json`. Extra entries are appended to the official workspace and session row menus (the session ones through DSH's own `sidebar.workspaces.session.menu.item` slot, the workspace ones injected into the menu DSH hardcodes), on top of **multi-folder workspaces** (add folders one by one, pick one as the **primary** — the official workspace, session cwd, and workspace-write scope — while the rest stay readable and coordinatable, with the folder list injected into the system prompt) and Markdown session export. Rows are identified by DSH's `data-row-key`/`data-slot` contract; nothing claims a slot or reorders the official list. Session menus do not offer permanent delete.
 
 Supersedes the former `dsh-multi-repo`, which was renamed into this plugin; that package name is gone, and a first load still copies `~/.dsh/multi-repo/projects.json` forward when `bindings.json` is missing.
 
@@ -50,7 +50,7 @@ Click a `dsh-notification` system banner to focus the window and open that sessi
 
 ### [@just-genius/dsh-session-archive](plugins/dsh-session-archive)
 
-**Settings → 会话归档**: archived sessions grouped by workspace, with a confirmed delete. The sidebar keeps its one-click **归档会话** entry.
+**Settings → 会话归档**: archived sessions grouped by workspace, with restore and confirmed delete. On DSH 0.1.7, the official archive view is in the sidebar's **视图选项 → 显示已归档／仅显示已归档** filter; there is no separate official archive settings page to reappear when this plugin is disabled.
 
 ### [@just-genius/dsh-plugin-config](plugins/dsh-plugin-config)
 

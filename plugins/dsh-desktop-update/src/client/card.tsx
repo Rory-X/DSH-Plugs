@@ -1,5 +1,5 @@
-// Settings card for the `desktop-update` namespace, rendered inside the
-// Plugins section's configurable tab (`settings.plugin.item`).
+// Settings card for the `desktop-update` namespace, rendered on the bundle's
+// page in the sidebar Plugins manager (`plugins.bundle.config`).
 // Chrome comes from @just-genius/dsh-plugin-ui (the official PluginCard look:
 // collapsible header, staged edits, save/discard footer). Writes go through
 // ctx.settingsScope (generic settings RPC → settings.yaml).

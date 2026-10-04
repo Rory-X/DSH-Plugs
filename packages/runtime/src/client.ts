@@ -107,6 +107,8 @@ export interface SidebarRightService {
 
 /** A guide-page capsule contributed by a right-Sidebar tab type. */
 export interface SidebarRightGuideEntry {
+  /** Stable entry key; DSH 0.1.6+ guide renderers require one. */
+  id?: string
   order: number
   title: () => string
   /** Kept structural so plugins need not import the official primitives package. */

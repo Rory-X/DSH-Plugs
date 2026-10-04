@@ -33,8 +33,8 @@ import {
   HOST_SERVICES,
   Schema,
   readJsonBody,
+  readVolatileConfig,
   sendJson,
-  settingsNamespace,
 } from '@just-genius/dsh-plugin-runtime/host'
 
 import {
@@ -62,9 +62,9 @@ const POLL_INTERVAL_MS = 6 * 60 * 60 * 1000
 /** User-togglable gates for the two background checks. */
 export const Config = Schema.object({
   /** 自动检查 DSH-Desktop 本体更新（GitHub Releases）。 */
-  checkApp: Schema.boolean().default(true),
+  checkApp: Schema.boolean().default(true).volatile(),
   /** 自动检查 DSH 运行时更新（npm registry）。 */
-  checkDsh: Schema.boolean().default(true),
+  checkDsh: Schema.boolean().default(true).volatile(),
   /**
    * DSH 运行时更新渠道：npm dist-tag（latest/next/alpha）或按精确版本（custom）。
    * `alpha` 对应 npm 的 `alpha` dist-tag：上游发 alpha 时不会更新 `latest`，
@@ -75,11 +75,11 @@ export const Config = Schema.object({
     Schema.const('next' as const),
     Schema.const('alpha' as const),
     Schema.const('custom' as const),
-  ]).default('latest' as const),
+  ]).default('latest' as const).volatile(),
   /** dshChannel === 'custom' 时匹配的精确版本。 */
-  dshVersion: Schema.string().default(''),
+  dshVersion: Schema.string().default('').volatile(),
 })
-export type Config = Schemastery.TypeT<typeof Config>
+export type Config = DesktopUpdateConfig
 
 const DEFAULTS: Config = {
   checkApp: true,
@@ -88,7 +88,7 @@ const DEFAULTS: Config = {
   dshVersion: '',
 }
 
-export const inject = [HOST_SERVICES.webServer, HOST_SERVICES.settings] as const
+export const inject = [HOST_SERVICES.webServer] as const
 
 /** Narrow the request body helpers onto this plugin's response envelope. */
 function result(res: ServerResponseLike, status: number, body: DesktopUpdateResult): void {
@@ -98,7 +98,7 @@ function result(res: ServerResponseLike, status: number, body: DesktopUpdateResu
 /** Minimal response surface: enough for sendJson, no node:http import needed. */
 type ServerResponseLike = Parameters<typeof sendJson>[0]
 
-export function apply(ctx: Context) {
+export function apply(ctx: Context, config?: unknown) {
   let state: DesktopUpdateState = {
     ...EMPTY_STATE,
     versions: { app: '', dsh: installedDshVersion() ?? null },
@@ -134,29 +134,14 @@ export function apply(ctx: Context) {
     return inFlight
   }
 
-  // Take the settings scope directly rather than through
-  // `installSettingsSection`: that helper keeps the scope to itself and hands
-  // back only a read thunk, while detection needs `watch` (re-run when the
-  // gates or channel change). Registering the namespace is enough for the
-  // browser card, which reads it through the generic settings RPC.
-  let scope: { get(): Config } | undefined
   function currentConfig(): DesktopUpdateConfig {
-    return scope?.get() ?? DEFAULTS
+    return readVolatileConfig(config, DEFAULTS)
   }
 
-  ctx.inject([HOST_SERVICES.settings], (sctx) => {
-    const registered = sctx.settings.register(settingsNamespace(SETTINGS_NS), Config, { base: DEFAULTS })
-    scope = { get: () => registered.get() }
-    state = { ...state, config: registered.get() }
-    sctx.effect(
-      () =>
-        registered.watch((next) => {
-          state = { ...state, config: next }
-          // Gates or channel changed: re-detect on the new settings.
-          void detect()
-        }),
-      'desktop-update: settings watch',
-    )
+  state = { ...state, config: currentConfig() }
+  ctx.on('loader/volatile-update', () => {
+    state = { ...state, config: currentConfig() }
+    void detect()
   })
 
   ctx.effect(

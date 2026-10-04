@@ -43,6 +43,11 @@ export const Config: Schema<Record<string, unknown>> = Schema.object({
   customFilesEnabled: Schema.boolean().default(DEFAULT_CONFIG.customFilesEnabled).volatile(),
   sideChatEnabled: Schema.boolean().default(DEFAULT_CONFIG.sideChatEnabled).volatile(),
   sideChatContextEnabled: Schema.boolean().default(DEFAULT_CONFIG.sideChatContextEnabled).volatile(),
+  voiceShortcutEnabled: Schema.boolean().default(DEFAULT_CONFIG.voiceShortcutEnabled).volatile(),
+  voiceShortcut: Schema.string().default(DEFAULT_CONFIG.voiceShortcut).volatile(),
+  voiceAutoStopEnabled: Schema.boolean().default(DEFAULT_CONFIG.voiceAutoStopEnabled).volatile(),
+  voiceNoSpeechSeconds: Schema.number().min(3).max(30).default(DEFAULT_CONFIG.voiceNoSpeechSeconds).volatile(),
+  voiceAfterSpeechSeconds: Schema.number().min(1).max(10).default(DEFAULT_CONFIG.voiceAfterSpeechSeconds).volatile(),
   highlightThemeLight: Schema.string().default(DEFAULT_CONFIG.highlightThemeLight).volatile(),
   highlightThemeDark: Schema.string().default(DEFAULT_CONFIG.highlightThemeDark).volatile(),
   terminalShell: Schema.union([
