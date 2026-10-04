@@ -1,0 +1,886 @@
+diff --git a/plugins/dsh-flow/README.md b/plugins/dsh-flow/README.md
+index aadee74..8bbd6ee 100644
+--- a/plugins/dsh-flow/README.md
++++ b/plugins/dsh-flow/README.md
+@@ -6,6 +6,47 @@ Leader 规划、子 Agent 执行、流程图实时可调 —— 一个 DSH 插
+ 然后根据子 Agent 的产出调整这张图。执行过程在一个独立的 **Flow** 标签页里以流程图
+ （React Flow）实时呈现。
+ 
++## 并行与写作用域
++
++DSH 的子 Agent **继承父会话的工作目录**（in-process provider 的 `childSessionMeta`
++直接把 `parentHeader.cwd` 交给子会话，subagent seam 也没有 `cwd` 覆盖项）。
++所以「给每个子 Agent 一个独立 checkout」在当前 DSH 上做不到，**同一目录里两个
++子 Agent 同时改文件会互相覆盖**。
++
++安全性因此来自**所有权声明**，而不是文件系统隔离：
++
++```
++writeScope: ["src/auth"]      → 只能写这个前缀；与不重叠的作用域同波并行
++writeScope: []                → 只读；永远可并行
++省略 writeScope               → 爆炸半径未知，独占运行，且阻塞其它写者
++```
++
++三层保证：
++
++| 层 | 做什么 | 在哪 |
++|---|---|---|
++| 调度 | 重叠/未声明的作用域不进同一波，被推迟的节点保持 `pending` | `src/scope.ts`（纯函数）+ `orchestrator.pump` |
++| 运行时 | 子 Agent 的 `edit`/`write` 越界即被拒；声明了作用域的节点失去 `bash`/`pwsh` 与派发类工具 | `src/guard.ts` + `index.ts` 注册的全局 guard |
++| 提示词 | Leader 契约解释如何切分才能并行 | `src/policy.ts` |
++
++**为什么声明了作用域就不能用 shell？** shell 的写入无法用路径解析判定（重定向、
++脚本、构建工具都能写），任何解析器都会有 fail-open 的洞。所以不猜：声明作用域
++就移除 shell，需要 shell 的步骤不要声明作用域、独占运行。**并行安全与不受限的
++shell 在构造上互斥**，而不是靠约定。
++
++**为什么 `run_code`（PTC）没被移除？** 它内部发出的调用会带着**同一个
++`exec.agent`** 回到同一个 tool scheduler，因此 `tools.edit(...)` 会被上面那层 guard
++逐次判到；而 `tools.bash(...)` 仍被 shell 规则拒掉。反过来，在 r-mode / PTC 预设下
++`run_code` 是子 Agent 唯一的对外工具（子会话继承预设），禁掉它会让声明了作用域的
++节点**什么也做不了**。
++
++默认并行上限是 4，但**上限不等于实际并行度**：真正决定并发的是作用域。全都不声明
++作用域的计划行为与从前完全一致（一次一步），声明了互不重叠作用域的计划才会真正并行。
++画布节点上会显示 `只读 / 写作用域 … / 独占`，标题栏可直接调并发上限。
++
++**已知边界**：作用域的保证范围是「DSH 文件工具及其 PTC 绑定」，不含 MCP 工具或其它
++进程外写入通道；这些无法分类的工具不被拦截，需要靠工作区划分来避免冲突。
++
+ ## 开关：默认关闭，用户显式开启
+ 
+ Flow 模式**默认是关的**。开启方式二选一：
+@@ -97,9 +138,9 @@ dsh plugin --profile web remove @just-genius/dsh-flow
+ 
+ | 工具 | 作用 |
+ |---|---|
+-| `flow.plan` | 提交整张 DAG，并只启动第一个就绪步骤。立刻返回。 |
++| `flow.plan` | 提交整张 DAG，并启动所有能同波跑的步骤。立刻返回。节点可声明 `writeScope`。 |
+ | `flow.status` | 读图：状态 + 已完成节点的完整产出（可选 `nodeId` 只看一个节点）。 |
+-| `flow.next` | 验收通过后，启动下一个就绪步骤。Host 不会自动往下走。 |
++| `flow.next` | 验收通过后，放行下一波就绪步骤。Host 不会自动往下走。 |
+ | `flow.expand` | 把一个节点拆成子任务。运行中的子代理或 Leader 都可以调用。 |
+ | `flow.confirm` | 按需请求人工确认。Leader 或运行中的子代理可调用；调用后停手。 |
+ | `flow.patch` | 改图：`retry` / `skip` / `cancel` / `add` / `remove`。 |
+@@ -110,10 +151,16 @@ dsh plugin --profile web remove @just-genius/dsh-flow
+ `flow.plan` 会在派发前校验：重复 id、悬空依赖、自依赖、环 —— 任何一项都会带着具体原因
+ 被拒，而不是跑一半才崩。
+ 
++如果 `flow.next` 报「deferred for write-scope conflicts」，说明有节点作用域重叠、或压根
++没声明。那通常是**规划问题**（把工作切到互不重叠的目录即可），不是调度器的限制。
++
+ ## 界面
+ 
+ - **Flow 标签页**：和 Chat 并列的独立视图。节点按拓扑深度分列，状态用颜色区分，
+   边跟随上游节点状态（运行中会流动）。
++- **节点上的作用域徽章**：`只读 / 写作用域 … / 独占`，一眼看出为什么某步能并行、
++  另一部不能。
++- **标题栏的并发上限**：可直接调（1–8）；旁边标注「实际并行度还受 writeScope 约束」。
+ - **对话进度窗**：Flow 模式且已有计划时，Chat 对话区右下角显示可关闭的流程图预览
+   （当前步骤居中）。点击打开 Flow 标签；手动关闭后，直到计划标题/身份变化或退出
+   Flow 模式才会再出现。切到 Flow 标签会自动隐藏。
+@@ -129,9 +176,13 @@ dsh plugin --profile web remove @just-genius/dsh-flow
+ 是唯一可靠的状态来源。
+ 
+ **为什么每个节点 settle 都要叫醒 Leader？**
+-下一步不会自动开始。Leader 必须看完产出再 `flow.next`（或 `flow.patch`）。默认同
+-时只跑一步，所以一轮用户任务会按「规划 → 步骤 1 验收 → 步骤 2 验收 → … → 总结」
+-推进，而不是一次并行铺开再最后汇总。
++下一波不会自动开始。Leader 必须看完产出再 `flow.next`（或 `flow.patch`）。所以一轮
++用户任务会按「规划 → 第 1 波验收 → 第 2 波验收 → … → 总结」推进，而不是一次全部铺开
++再最后汇总。
++
++一波里能同时跑几个由**写作用域**决定（见上文「并行与写作用域」）：声明了互不重叠
++作用域的节点同波并行，未声明的节点独占运行。并发上限只是天花板，不承诺并行度 ——
++所以不声明作用域的计划行为与从前一致：一次一步。
+ 
+ **`flow.status` 会不会截断？**
+ 会，但是给画布和给模型是两套上限。Host 会保存每个子 Agent 的完整产出（安全上限
+@@ -163,11 +214,13 @@ pnpm --filter @just-genius/dsh-flow watch      # watch 模式
+ | `src/types.ts` | Host-only 运行态（live Agent、`SubagentRun`、AbortController） |
+ | `src/mode.ts` | 会话级模式状态机：暂存 / 提交 / 取消切换（有单测） |
+ | `src/graph.ts` | 纯函数：校验、环检测、ready 集、拓扑分层（有单测） |
+-| `src/orchestrator.ts` | 派发、结算、重调度、按波唤醒 |
++| `src/scope.ts` | 纯函数：写作用域归一化、重叠判定、同波可否并行（有单测） |
++| `src/guard.ts` | 纯函数：给定作用域与该次工具调用，决定放行还是拒绝（有单测） |
++| `src/orchestrator.ts` | 派发、结算、重调度、按波唤醒、作用域门控 |
+ | `src/wake-policy.ts` | 何时唤醒 Leader（有单测） |
+ | `src/policy.ts` | Leader 契约文案（仅在模式开启时注入） |
+ | `src/tools.ts` | `flow.plan` / `status` / `next` / `patch` / `clear` |
+-| `src/index.ts` | Host apply：注册工具 / 路由 / `/flow` 命令 / 工具守卫 |
++| `src/index.ts` | Host apply：注册工具 / 路由 / `/flow` 命令 / 两个工具守卫 |
+ | `src/client/` | React Flow 画布 + 节点卡 + 布局 + 轮询 |
+ 
+ ### 一处构建约定
+@@ -183,3 +236,9 @@ HMR receiver 也会同样清理它。见 `tsdown.client.config.ts`。
+ - 子 Agent 用一次性 run，不用 continuable —— 重试即新 run，没有追问/打断能力。
+ - 不支持画布拖拽改拓扑。
+ - 并发上限全局生效，不能按节点设。
++- 写作用域是**声明式**的，保证范围是「DSH 文件工具及其 PTC 绑定」:
++  - 不含 MCP 工具与其它进程外写入通道（无法分类，因此不拦截）。
++  - 子 Agent 继承父会话的 cwd，所以没有文件系统级隔离；安全性来自调度串行化 +
++    运行时门禁，两者都依赖模型如实声明作用域。声明范围写得比实际需要小时，越界写
++    会被拒（安全方向）；写得过大时，会与更多节点冲突而被串行化（性能方向），
++    不会造成数据覆盖。
+diff --git a/plugins/dsh-flow/package.json b/plugins/dsh-flow/package.json
+index 3e76533..8bfe210 100644
+--- a/plugins/dsh-flow/package.json
++++ b/plugins/dsh-flow/package.json
+@@ -22,7 +22,8 @@
+   "dsh": {
+     "client": {
+       "inject": [
+-        "@deepseek-ai/dsh-client-runtime",
++        "@deepseek-ai/dsh-api-session-controller",
++        "@deepseek-ai/dsh-api-workspace-controller",
+         "@deepseek-ai/dsh-client-locale",
+         "@deepseek-ai/dsh-api-remotes",
+         "@deepseek-ai/dsh-client-ui-conversation"
+diff --git a/plugins/dsh-flow/src/client/FlowCanvas.module.css b/plugins/dsh-flow/src/client/FlowCanvas.module.css
+index 918e51f..32ae1e0 100644
+--- a/plugins/dsh-flow/src/client/FlowCanvas.module.css
++++ b/plugins/dsh-flow/src/client/FlowCanvas.module.css
+@@ -89,6 +89,37 @@
+   transition: width 200ms ease-out;
+ }
+ 
++/*
++ * Concurrency cap. The cap is not the actual parallelism — the write-scope gate
++ * decides that — so the hint sits next to it rather than the number standing
++ * alone and misleading.
++ */
++.concurrencyRow {
++  display: flex;
++  align-items: center;
++  gap: 8px;
++}
++
++.concurrencyLabel {
++  font-size: 11px;
++  color: var(--dsw-alias-label-secondary);
++}
++
++.concurrencyInput {
++  width: 52px;
++  padding: 2px 6px;
++  font-size: 11px;
++  border-radius: 6px;
++  border: 1px solid var(--dsw-alias-border-secondary);
++  background: var(--dsw-alias-bg-base);
++  color: var(--dsw-alias-label-primary);
++}
++
++.concurrencyHint {
++  font-size: 11px;
++  color: var(--dsw-alias-label-caption);
++}
++
+ .legend {
+   display: flex;
+   flex-wrap: wrap;
+@@ -272,6 +303,32 @@
+   font-family: var(--dsw-font-family-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+ }
+ 
++/*
++ * Write-scope badge: the declaration that decides whether a node may share a
++ * wave. Colours resolve through --dsw-* so light and dark stay correct.
++ */
++.scopeBadge {
++  align-self: flex-start;
++  max-width: 100%;
++  padding: 0 6px;
++  border-radius: 999px;
++  font-size: 10px;
++  line-height: 16px;
++  overflow: hidden;
++  text-overflow: ellipsis;
++  white-space: nowrap;
++  background: var(--dsw-alias-bg-overlay);
++  color: var(--dsw-alias-label-secondary);
++}
++
++.scopeBadge[data-scope='scoped'] {
++  color: var(--dsw-alias-state-success-primary, var(--dsw-alias-label-secondary));
++}
++
++.scopeBadge[data-scope='exclusive'] {
++  color: var(--dsw-alias-state-warning-primary, var(--dsw-alias-label-secondary));
++}
++
+ .attempts {
+   align-self: flex-start;
+   padding: 0 6px;
+diff --git a/plugins/dsh-flow/src/client/FlowCanvas.tsx b/plugins/dsh-flow/src/client/FlowCanvas.tsx
+index cf306cc..ca8a803 100644
+--- a/plugins/dsh-flow/src/client/FlowCanvas.tsx
++++ b/plugins/dsh-flow/src/client/FlowCanvas.tsx
+@@ -6,7 +6,7 @@ import { useCallback, useState } from 'react'
+ import { Button } from '@just-genius/dsh-plugin-ui'
+ import type { PropsRuntime } from '@just-genius/dsh-plugin-runtime/client'
+ 
+-import { ACTION_PATH, MODE_PATH, waitingForConfirm } from '../shared.ts'
++import { ACTION_PATH, CONCURRENCY_MAX, CONCURRENCY_MIN, MODE_PATH, waitingForConfirm } from '../shared.ts'
+ import type {
+   FlowAction,
+   FlowNodeView,
+@@ -69,6 +69,18 @@ export function FlowCanvas({ sessionId }: FlowCanvasProps) {
+     }
+   }, [sessionId])
+ 
++  const setConcurrency = useCallback(async (concurrency: number) => {
++    setError(null)
++    try {
++      await postResult<{ ok: boolean; message: string | null }>(
++        `${ACTION_PATH}?sessionId=${encodeURIComponent(sessionId)}`,
++        { kind: 'setConcurrency', concurrency },
++      )
++    } catch (cause) {
++      setError(cause instanceof Error ? cause.message : String(cause))
++    }
++  }, [sessionId])
++
+   if (!state.mode) {
+     return (
+       <OffState
+@@ -110,6 +122,27 @@ export function FlowCanvas({ sessionId }: FlowCanvasProps) {
+           <div className={styles.meterFill} style={{ width: `${Math.round(progress * 100)}%` }} />
+         </div>
+ 
++        <div className={styles.concurrencyRow}>
++          <label className={styles.concurrencyLabel} htmlFor="dsh-flow-concurrency">
++            并发上限
++          </label>
++          <input
++            id="dsh-flow-concurrency"
++            className={styles.concurrencyInput}
++            type="number"
++            min={CONCURRENCY_MIN}
++            max={CONCURRENCY_MAX}
++            value={plan.concurrency}
++            onChange={(event) => {
++              const next = Number.parseInt(event.target.value, 10)
++              if (Number.isFinite(next)) void setConcurrency(next)
++            }}
++          />
++          <span className={styles.concurrencyHint} title="上限不等于实际并行度：未声明 writeScope 的节点仍会独占运行">
++            实际并行度还受 writeScope 约束
++          </span>
++        </div>
++
+         <div className={styles.legend}>
+           {(['pending', 'running', 'expanded', 'done', 'failed', 'skipped'] as const).map((status) => (
+             <span key={status} className={styles.legendItem}>
+diff --git a/plugins/dsh-flow/src/client/NodeCard.tsx b/plugins/dsh-flow/src/client/NodeCard.tsx
+index 23b3323..f1ec141 100644
+--- a/plugins/dsh-flow/src/client/NodeCard.tsx
++++ b/plugins/dsh-flow/src/client/NodeCard.tsx
+@@ -31,6 +31,8 @@ export function NodeCard({ node, selected }: NodeCardProps) {
+         {node.parentId !== undefined ? `${node.parentId} / ${node.id}` : node.id}
+       </code>
+ 
++      <ScopeBadge node={node} />
++
+       {node.attempts > 1 && (
+         <span className={styles.attempts}>attempt {node.attempts}</span>
+       )}
+@@ -63,6 +65,33 @@ export function NodeCard({ node, selected }: NodeCardProps) {
+   )
+ }
+ 
++/**
++ * Write-scope badge.
++ *
++ * The scheduler's whole parallelism story is decided by this declaration, so
++ * the canvas has to show it: a Leader (or user) staring at a plan that runs one
++ * step at a time needs to see at a glance that the nodes never declared a
++ * scope, rather than assuming the scheduler is slow.
++ */
++function ScopeBadge({ node }: { readonly node: FlowNodeView }) {
++  switch (node.scopeKind) {
++    case 'readonly':
++      return <span className={styles.scopeBadge} data-scope="readonly">只读 · 可并行</span>
++    case 'scoped':
++      return (
++        <span className={styles.scopeBadge} data-scope="scoped" title={(node.writeScope ?? []).join('\n')}>
++          写作用域 {node.writeScope?.join(', ')} · 可并行
++        </span>
++      )
++    default:
++      return (
++        <span className={styles.scopeBadge} data-scope="exclusive" title="未声明 writeScope：运行期间独占，其它写操作会被推迟">
++          独占 · 单独运行
++        </span>
++      )
++  }
++}
++
+ /** Edge colour follows the upstream node's status. */
+ export function edgeClassFor(status: NodeStatus): string {
+   switch (status) {
+diff --git a/plugins/dsh-flow/src/index.ts b/plugins/dsh-flow/src/index.ts
+index 7989d6f..6c5babb 100644
+--- a/plugins/dsh-flow/src/index.ts
++++ b/plugins/dsh-flow/src/index.ts
+@@ -14,6 +14,7 @@ import { HOST_SERVICES, createUserMessage, errorMessage, readJsonBody, sendJson
+ import type { Agent } from '@just-genius/dsh-plugin-runtime/host'
+ 
+ import { FlowOrchestrator } from './orchestrator.ts'
++import { guardReason } from './guard.ts'
+ import { commitFlowMode, createFlowModeStore, sessionIdOf, setFlowMode, type FlowModeStore } from './mode.ts'
+ import { IDLE_HINT, LEADER_POLICY } from './policy.ts'
+ import { createFlowTools } from './tools.ts'
+@@ -148,6 +149,29 @@ export function apply(ctx: Context): void {
+     'dsh-flow: leader tool guard',
+   )
+ 
++  // The write-scope guard: the enforcement half of "concurrent edits are safe".
++  // A running child may only write inside the prefixes its node declared, and a
++  // step that declared a scope loses the tools that could escape it.
++  //
++  // Registered on the PLAIN context so it applies globally, which is what makes
++  // it reach subagent children. A child runs on its own scoped context, so a
++  // guard registered through `agent.ctx` would never see it.
++  ctx.effect(
++    () => ctx.tools.guard((exec) => {
++      const agent = exec.agent
++      if (agent === undefined) return undefined
++      const child = orchestrator.scopeOfChildSession(sessionIdOf(agent))
++      if (child === null) return undefined
++      return guardReason({
++        toolName: exec.name,
++        args: exec.arguments,
++        declared: child.declared,
++        cwd: child.cwd,
++      }) ?? undefined
++    }),
++    'dsh-flow: write-scope guard',
++  )
++
+   // A mid-turn mode switch cannot rewrite the prompt already sent to the model,
+   // so it is staged and committed here — the last point where a fresh assembly
+   // can still happen. The listener only observes; the decision stays with the
+diff --git a/plugins/dsh-flow/src/orchestrator.ts b/plugins/dsh-flow/src/orchestrator.ts
+index faa6e8a..6f83abc 100644
+--- a/plugins/dsh-flow/src/orchestrator.ts
++++ b/plugins/dsh-flow/src/orchestrator.ts
+@@ -12,6 +12,7 @@ import { createUserMessage } from '@just-genius/dsh-plugin-runtime/host'
+ import type { Agent } from '@just-genius/dsh-plugin-runtime/host'
+ 
+ import { depthOf, readyIds, validatePlan, type PlanRejection } from './graph.ts'
++import { mayRunTogether, scopeKindOf, describeScope } from './scope.ts'
+ import { CHILD_EXPAND_HINT, CHILD_REPORT_HINT } from './policy.ts'
+ import {
+   NOTE_MAX,
+@@ -93,6 +94,17 @@ export interface Degraded {
+   readonly reason: string
+ }
+ 
++/**
++ * One ready node the scheduler deferred because an in-flight node's declared
++ * write scope conflicts with its own.
++ */
++export interface ScopeBlock {
++  /** The node that stayed `pending`. */
++  readonly nodeId: string
++  /** The in-flight node holding the overlapping scope. */
++  readonly holderId: string
++}
++
+ const DEFAULT_PROVIDER = 'spawn'
+ 
+ export class FlowOrchestrator {
+@@ -475,20 +487,60 @@ export class FlowOrchestrator {
+ 
+     const started = this.pump(plan.parent)
+     if (started.length > 0) {
+-      return [`Started ${started.map((id) => `"${id}"`).join(', ')}.`, '', this.report()].join('\n')
++      const deferred = this.describeScopeBlocks()
++      const lines = [`Started ${started.map((id) => `"${id}"`).join(', ')}.`]
++      if (deferred !== null) lines.push('', deferred)
++      lines.push('', this.report())
++      return lines.join('\n')
+     }
+ 
+     const running = [...plan.nodes.values()].filter((node) => node.status === 'running')
+     if (running.length > 0) {
+-      return `Nothing new started; ${running.map((node) => node.spec.id).join(', ')} already running. Wait for that child to settle.`
++      const deferred = this.describeScopeBlocks()
++      const lines = [
++        `Nothing new started; ${running.map((node) => node.spec.id).join(', ')} already running. Wait for that child to settle.`,
++      ]
++      // A scope deferral is a different story from "the concurrency cap is
++      // full": the Leader can fix it by declaring disjoint scopes, so say so.
++      if (deferred !== null) lines.push('', deferred)
++      return lines.join('\n')
+     }
+     const failed = [...plan.nodes.values()].filter((node) => node.status === 'failed')
+     if (failed.length > 0) {
+       return `Nothing is ready. Failed node(s) block dependents: ${failed.map((node) => node.spec.id).join(', ')}. Patch them (retry / skip / add), then call flow.next.`
+     }
++    const deferred = this.describeScopeBlocks()
++    if (deferred !== null) return deferred
+     return 'Nothing is ready to run yet. Call flow.status and inspect the graph.'
+   }
+ 
++  /**
++   * Model-facing account of the last pump's write-scope deferrals, or `null`
++   * when nothing was deferred.
++   *
++   * Without this, a Leader whose parallel plan ran one step at a time would
++   * only see "already running" and could not tell a full concurrency budget
++   * from a scope conflict it is able to fix.
++   */
++  private describeScopeBlocks(): string | null {
++    const plan = this.plan
++    if (plan === null || this.lastScopeBlocks.length === 0) return null
++    const lines = ['Deferred for write-scope conflicts (they stay pending and start on a later wave):']
++    for (const block of this.lastScopeBlocks) {
++      const node = plan.nodes.get(block.nodeId)
++      const holder = plan.nodes.get(block.holderId)
++      lines.push(
++        `- "${block.nodeId}" waits for "${block.holderId}": ${holder?.spec.title ?? ''} `
++        + `(${describeScope(holder?.spec ?? {})}) conflicts with ${describeScope(node?.spec ?? {})}.`,
++      )
++    }
++    lines.push(
++      '',
++      'To parallelize them, declare disjoint `writeScope` prefixes on each node (or `[]` for a step that only reads).',
++    )
++    return lines.join('\n')
++  }
++
+   /** The wire-safe projection consumed by the canvas. */
+   view(): FlowPlanView | null {
+     const plan = this.plan
+@@ -506,6 +558,7 @@ export class FlowOrchestrator {
+         notes: [...node.notes],
+         updatedAt: node.updatedAt,
+         attempts: node.attempts,
++        scopeKind: scopeKindOf(node.spec),
+       })
+     }
+     return {
+@@ -595,24 +648,80 @@ export class FlowOrchestrator {
+       return []
+     }
+ 
+-    const running = [...plan.nodes.values()].filter((node) => node.status === 'running').length
+-    let budget = plan.concurrency - running
++    const runningNodes = [...plan.nodes.values()].filter((node) => node.status === 'running')
++    let budget = plan.concurrency - runningNodes.length
+     const started: string[] = []
++    const blocked: ScopeBlock[] = []
++    // Nodes started in THIS pump pass count too: they are in flight by the time
++    // the next candidate is considered, even though `status` already says so.
++    const inFlight = [...runningNodes]
+ 
+     for (const id of readyIds(this.ordered(), (nodeId) => this.statusOf(nodeId))) {
+       if (budget <= 0) break
+       const node = plan.nodes.get(id)
+       if (node === undefined || node.status !== 'pending') continue
++
++      // Write-scope gate. This is the structural half of "concurrent edits are
++      // safe": a node that did not declare its blast radius runs alone, and two
++      // declared scopes that overlap never share a wave. An overlapping node is
++      // deferred rather than failed — it stays `pending` and starts on the next
++      // wave, once the holder settles.
++      const conflict = inFlight.find((other) => !mayRunTogether(node.spec, other.spec))
++      if (conflict !== undefined) {
++        blocked.push({ nodeId: id, holderId: conflict.spec.id })
++        continue
++      }
++
+       if (this.dispatch(node, parent)) {
+         started.push(id)
++        inFlight.push(node)
+         budget -= 1
+       }
+     }
+ 
++    this.lastScopeBlocks = blocked
+     this.refreshPlanStatus()
+     return started
+   }
+ 
++  /**
++   * Ready nodes that the last pump deferred for write-scope reasons, with the
++   * in-flight holder that caused each deferral.
++   *
++   * Reported through `flow.status` / `advance()`: a Leader that sees nothing
++   * started deserves to know whether the graph was blocked or the scopes were.
++   */
++  private lastScopeBlocks: ScopeBlock[] = []
++
++  /** Deferrals recorded by the most recent pump, for model-facing reports. */
++  get scopeBlocks(): readonly ScopeBlock[] {
++    return this.lastScopeBlocks
++  }
++
++  /**
++   * The write scope and cwd of one live child, or `null` when this session is
++   * not a flow child.
++   *
++   * The tool guard resolves an executing Agent through this. A child is
++   * identified by its session id — the only handle the guard has, and the same
++   * value the plan already stores as `run.childId`.
++   *
++   * Returning `null` (rather than an empty scope) is load-bearing: it is what
++   * tells the guard "not ours, leave this call alone". A node that declared
++   * nothing yields `declared: undefined`, which the guard reads as exclusive.
++   */
++  scopeOfChildSession(sessionId: string): { readonly declared: readonly string[] | undefined; readonly cwd: string | undefined } | null {
++    const plan = this.plan
++    if (plan === null) return null
++    for (const node of plan.nodes.values()) {
++      if (node.run?.childId !== sessionId) continue
++      const live = this.ctx.get('agents') as { get(id: unknown): Agent | undefined } | undefined
++      const child = live?.get(sessionId)
++      return { declared: node.spec.writeScope, cwd: child?.session.header.cwd }
++    }
++    return null
++  }
++
+   /** Start one child agent for a node. Returns false when it could not start. */
+   private dispatch(node: RuntimeNode, parent: Agent): boolean {
+     const seam = this.subagents
+@@ -776,7 +885,7 @@ export class FlowOrchestrator {
+ 
+       const message = createUserMessage({
+         content: [{ type: 'text', text }],
+-        source: { kind: 'plugin', plugin: 'dsh-flow', form: 'notice', summary: truncate(text, 120) },
++        source: { kind: 'dsh-flow', form: 'notice', summary: truncate(text, 120) },
+       })
+       live.followup(message)
+     } catch {
+@@ -1023,6 +1132,9 @@ function normalizeSpec(spec: FlowNodeSpec): FlowNodeSpec {
+     ...(spec.persona !== undefined ? { persona: spec.persona } : {}),
+     ...(spec.confirm === true ? { confirm: true } : {}),
+     ...(spec.toolFilter !== undefined ? { toolFilter: { ...spec.toolFilter } } : {}),
++    // An EMPTY array is preserved on purpose: it is the explicit read-only
++    // claim, which is a different statement from "undeclared" (exclusive).
++    ...(Array.isArray(spec.writeScope) ? { writeScope: [...spec.writeScope] } : {}),
+   }
+ }
+ 
+diff --git a/plugins/dsh-flow/src/policy.ts b/plugins/dsh-flow/src/policy.ts
+index 825e657..101b4f4 100644
+--- a/plugins/dsh-flow/src/policy.ts
++++ b/plugins/dsh-flow/src/policy.ts
+@@ -18,25 +18,51 @@ export const LEADER_POLICY = [
+   '1. Decompose the request into steps. Give each step a complete, self-contained',
+   '   prompt — a child agent does NOT see this conversation. Declare real',
+   '   dependencies with `deps`.',
+-  '2. `flow.plan` starts only the first ready step (default concurrency 1). Tell',
+-  '   the user that step is running, then stop. Do not start later steps yourself.',
+-  '3. When that child settles you are woken. Call `flow.status` (optionally with',
+-  '   `nodeId`) and inspect the result.',
+-  '4. If the result is good, call `flow.next` to start the next ready step, then',
++  '2. Declare `writeScope` on every step (see 「Parallelism」 below) unless it',
++  '   genuinely needs a shell or must run alone.',
++  '3. `flow.plan` starts the ready steps that may run together. Tell the user',
++  '   which steps are running, then stop. Do not start later steps yourself.',
++  '4. When the wave settles you are woken. Call `flow.status` (optionally with',
++  '   `nodeId`) and inspect the results.',
++  '5. If the results are good, call `flow.next` to release the next wave, then',
+   '   stop. Do not write a long user-facing recap of every step. Do NOT ask the',
+   '   user to confirm ordinary steps.',
+-  '5. If the result is bad, `flow.patch` (retry with a revised prompt, skip, or',
++  '6. If a result is bad, `flow.patch` (retry with a revised prompt, skip, or',
+   '   add a corrective step). A failed step blocks its dependents until you act.',
+-  '6. A child may call `flow.expand` when its assignment is actually several',
++  '7. A child may call `flow.expand` when its assignment is actually several',
+   '   steps. Inspect the breakdown, then `flow.next` to start the first child.',
+   '   You may also author `parentId` on nodes in `flow.plan` / `flow.patch`.',
+-  '7. Ask a human only when a real decision is needed (ambiguous requirement,',
++  '8. Ask a human only when a real decision is needed (ambiguous requirement,',
+   '   risky change, expand looks wrong). Then call `flow.confirm` with a short',
+   '   question and stop. Mark a planned gate with `confirm: true` on that node.',
+   '   The Flow tab shows 「通过并继续」 only while a confirm is pending.',
+-  '8. Write a user-facing summary only after the plan settles, or when you need',
++  '9. Write a user-facing summary only after the plan settles, or when you need',
+   '   a decision from the user.',
+   '',
++  '## Parallelism: what actually makes steps run at once',
++  '',
++  'A child agent inherits THIS session\u2019s working directory — it cannot be given',
++  'its own checkout. Two steps that edit the same files would therefore overwrite',
++  'each other. `writeScope` is how you prevent that, and it is what buys speed:',
++  '',
++  '- `writeScope: ["src/auth"]` — may write only under that prefix. Two steps',
++  '  with non-overlapping prefixes run in the SAME wave.',
++  '- `writeScope: []` — the step only reads. Always parallelizable.',
++  '- omitting it — unknown blast radius, so the step runs ALONE and blocks every',
++  '  other writer while it runs. Commit steps and steps needing a shell go here.',
++  '',
++  'Consequences worth internalising:',
++  '- A step with a `writeScope` CANNOT use `bash`/`pwsh` or delegate',
++  '  (`subagent`, `workflow`, `run_code`): a shell or a grandchild session could',
++  '  write anywhere, making the scope a lie. The guard refuses those calls. If a',
++  '  step needs a shell, give it no scope and accept that it runs alone.',
++  '  (Commit, install, and test-runner steps are exclusive by nature.)',
++  '- Splitting work so each step owns a disjoint directory is the whole game.',
++  '  Prefer 3 focused parallel steps over 6 that fight over one file.',
++  '- If `flow.next` reports steps "deferred for write-scope conflicts", the',
++  '  scopes overlap or were never declared. That is usually a planning mistake,',
++  '  not a scheduler limitation — fix the scopes rather than just waiting.',
++  '',
+   'Rules:',
+   '- Never assume later steps have started. They wait for `flow.next`.',
+   '- Do not request human confirmation after every step.',
+@@ -46,6 +72,9 @@ export const LEADER_POLICY = [
+   '- Keep steps small enough to review and large enough to be self-contained.',
+   '- Read-only investigation (reading files, searching, fetching docs) is yours to',
+   '   do directly; it makes your plans better and costs no delegation.',
++  '- Two steps with overlapping scopes must be ordered with `deps` instead of run',
++  '   in parallel. The scheduler enforces this, but an explicit `deps` edge',
++  '   records WHY and survives a later scope tweak.',
+   '',
+   'The user leaves this mode with `/flow off`. Until then, lead.',
+ ].join('\n')
+@@ -55,7 +84,8 @@ export const IDLE_HINT = [
+   'Flow mode is on and no plan is active. When the user gives you work, express',
+   'it as a graph with `flow.plan` rather than doing it step by step yourself.',
+   'Coarse steps are fine: a child that finds it owns several real steps will',
+-  'expand itself into a subtree.',
++  'expand itself into a subtree. Declare `writeScope` per step so independent',
++  'work can run in the same wave instead of one step at a time.',
+ ].join('\n')
+ 
+ /** Appended to every child brief so a coarse node can split itself. */
+diff --git a/plugins/dsh-flow/src/shared.ts b/plugins/dsh-flow/src/shared.ts
+index 3fc76c4..27ef066 100644
+--- a/plugins/dsh-flow/src/shared.ts
++++ b/plugins/dsh-flow/src/shared.ts
+@@ -53,6 +53,17 @@ export interface FlowNodeSpec {
+   readonly confirm?: boolean
+   /** Optional per-node tool scoping for the child. */
+   readonly toolFilter?: { readonly allow?: readonly string[]; readonly deny?: readonly string[] }
++  /**
++   * Workspace-relative paths this step may modify.
++   *
++   * Omitted means "unknown blast radius", and the node then runs alone
++   * (`exclusive`). An empty array is the explicit read-only claim. A non-empty
++   * list makes the node parallel-safe against any scope it does not overlap.
++   * See `./scope.ts` for why this is a declaration rather than an isolation
++   * mechanism: a DSH child inherits the parent's `cwd`, so ownership is the
++   * only available safety property.
++   */
++  readonly writeScope?: readonly string[]
+ }
+ 
+ /** The model-authored shape of one plan. */
+@@ -86,6 +97,11 @@ export interface FlowNodeView extends FlowNodeSpec {
+   readonly updatedAt: string
+   /** How many times this node has been dispatched (a retry starts a new run). */
+   readonly attempts: number
++  /**
++   * Scheduling meaning of this node's declaration, so the canvas can show why
++   * a node is or is not running beside its siblings.
++   */
++  readonly scopeKind: 'exclusive' | 'readonly' | 'scoped'
+ }
+ 
+ /** A pending human gate, set by the Leader, a child, or a node marked `confirm`. */
+@@ -156,7 +172,17 @@ export interface HttpResult<T> {
+ /** Clamp applied to every `concurrency` request. */
+ export const CONCURRENCY_MIN = 1
+ export const CONCURRENCY_MAX = 8
+-export const CONCURRENCY_DEFAULT = 1
++/**
++ * How many steps may run at once when the plan does not say.
++ *
++ * This is a CAP, not a promise of parallelism: the write-scope gate in the
++ * scheduler still serializes anything whose blast radius is unknown or
++ * overlapping. A plan whose nodes declare no scope therefore behaves exactly as
++ * it did when this was 1 — one step at a time — while a plan that declares
++ * disjoint scopes actually gets the fleet it asked for. Raising this default
++ * buys parallelism for declared plans without loosening the undeclared ones.
++ */
++export const CONCURRENCY_DEFAULT = 4
+ 
+ /** Truncation applied to child output before it crosses the HTTP wire. */
+ export const SUMMARY_LIMIT = 2000
+diff --git a/plugins/dsh-flow/src/tools.ts b/plugins/dsh-flow/src/tools.ts
+index 5b8bc52..06952fe 100644
+--- a/plugins/dsh-flow/src/tools.ts
++++ b/plugins/dsh-flow/src/tools.ts
+@@ -43,7 +43,12 @@ interface ToolDeps {
+ const MODE_OFF = 'Flow mode is off. Enter it with `/flow` before using flow tools.'
+ 
+ /**
+- * The node shape, shared by `flow.plan` and `flow.patch`.
++ * The node shape, shared by `flow.plan`, `flow.patch`, and `flow.expand`.
++ *
++ * Exported so the boot-safety test compiles THE REAL schema rather than a copy:
++ * a duplicated literal in the test file cannot catch drift, and an unsupported
++ * key here crashes the whole profile at startup (these tools are built inside
++ * `apply()`).
+  *
+  * No `required` block on purpose. The schema DSL compiles an array's `items`
+  * with `allowRequired: false`, so a `required` key inside an object that is
+@@ -51,7 +56,7 @@ const MODE_OFF = 'Flow mode is off. Enter it with `/flow` before using flow tool
+  * Requiredness is therefore described in the description text and enforced by
+  * `readNode`, which already validates every argument before use.
+  */
+-const NODE_SCHEMA = {
++export const NODE_SCHEMA = {
+   type: 'object',
+   additionalProperties: false,
+   properties: {
+@@ -62,6 +67,12 @@ const NODE_SCHEMA = {
+     parentId: { type: 'string', description: 'Optional. Nest this node under another node as a child step.' },
+     persona: { type: 'string', description: 'Optional per-node persona override for the child.' },
+     confirm: { type: 'boolean', description: 'Optional. If true, pause for a human after this node settles.' },
++    writeScope: {
++      type: 'array',
++      items: { type: 'string' },
++      description:
++        'Workspace-relative paths this step may modify. Omit it and the step runs ALONE (unknown blast radius). Pass [] for a step that only reads. Pass explicit prefixes (["src/auth", "src/auth/client.ts"]) so steps with disjoint scopes share a wave. A child is hard-blocked from writing outside its declared prefixes.',
++    },
+   },
+ } as const
+ 
+@@ -78,17 +89,35 @@ function renderPlan(outcome: PlanOutcome): string {
+   const lines = [`Plan "${plan.title}" accepted with ${plan.nodes.length} node(s); concurrency ${plan.concurrency}.`, '']
+   for (const node of plan.nodes) {
+     const deps = node.deps.length === 0 ? 'no deps' : `depends on ${node.deps.join(', ')}`
+-    lines.push(`- ${node.id} [${node.status}] ${node.title} (${deps})`)
++    lines.push(`- ${node.id} [${node.status}] ${node.title} (${deps}) — ${SCOPE_LABEL[node.scopeKind]}`)
++  }
++  const started = plan.nodes.filter((node) => node.status === 'running')
++  const exclusive = plan.nodes.filter((node) => node.scopeKind === 'exclusive')
++  if (plan.nodes.length > 1 && exclusive.length > 0) {
++    lines.push(
++      '',
++      `${exclusive.length} node(s) declared no \`writeScope\`, so they run one at a time and block every other writer while running.`,
++      'If those steps touch disjoint directories, declare each `writeScope` and they will share a wave.',
++    )
+   }
+   lines.push(
+     '',
+-    'The first ready step has started. Tell the user that step is running, then stop.',
+-    'When it settles, inspect with flow.status. If the result is good, call flow.next.',
++    started.length > 0
++      ? `Started ${started.length} step(s): ${started.map((node) => node.id).join(', ')}. Tell the user those are running, then stop.`
++      : 'Nothing started yet. Inspect the graph with flow.status.',
++    'When a step settles, inspect with flow.status. If the result is good, call flow.next.',
+     'Later steps do not start until you do.',
+   )
+   return lines.join('\n')
+ }
+ 
++/** One-line scope summary for tool output. */
++const SCOPE_LABEL: Record<'exclusive' | 'readonly' | 'scoped', string> = {
++  exclusive: '独占（未声明 writeScope，单独运行）',
++  readonly: '只读',
++  scoped: '可并行（已声明写作用域）',
++}
++
+ 
+ 
+ export function createFlowTools(deps: ToolDeps) {
+@@ -105,7 +134,7 @@ export function createFlowTools(deps: ToolDeps) {
+   const flowPlan = defineTool({
+     name: 'flow.plan',
+     description:
+-      'Flow mode only. Replace the current workflow graph with a new plan and start the first ready step. Later steps stay pending until you accept a result and call flow.next. Use `parentId` to nest child steps under a node. A child that finds it owns several tasks can also call flow.expand. Each node needs a complete, self-contained prompt.',
++      'Flow mode only. Replace the current workflow graph with a new plan and start the first ready step(s). Later steps stay pending until you accept a result and call flow.next. Use `parentId` to nest child steps under a node. A child that finds it owns several tasks can also call flow.expand. Each node needs a complete, self-contained prompt. For real parallelism, give every step that writes a `writeScope`; steps without one run alone.',
+     parameters: {
+       title: { type: 'string', description: 'Short name for this plan, shown on the Flow tab.' },
+       nodes: {
+@@ -115,7 +144,7 @@ export function createFlowTools(deps: ToolDeps) {
+       },
+       concurrency: {
+         type: 'integer',
+-        description: `How many steps may run at once (${CONCURRENCY_MIN}–${CONCURRENCY_MAX}). Defaults to 1 so the Leader reviews each result before the next step starts.`,
++        description: `How many steps may run at once (${CONCURRENCY_MIN}–${CONCURRENCY_MAX}). Actual parallelism is also bounded by write scopes: steps with no declared \`writeScope\` never overlap, and overlapping scopes are deferred to a later wave.`,
+       },
+     },
+     output: {
+@@ -339,6 +368,7 @@ interface RawNode {
+   readonly parentId?: unknown
+   readonly persona?: unknown
+   readonly confirm?: unknown
++  readonly writeScope?: unknown
+ }
+ 
+ function normalizePlanArgs(args: unknown): FlowPlanSpec | string {
+@@ -453,6 +483,10 @@ function readNode(raw: unknown): FlowNodeSpec | string {
+     ...(typeof node.parentId === 'string' && node.parentId.trim() !== '' ? { parentId: node.parentId } : {}),
+     ...(typeof node.persona === 'string' ? { persona: node.persona } : {}),
+     ...(node.confirm === true ? { confirm: true } : {}),
++    // `[]` is preserved: an explicit read-only claim differs from omission.
++    ...(Array.isArray(node.writeScope)
++      ? { writeScope: node.writeScope.filter((entry): entry is string => typeof entry === 'string') }
++      : {}),
+   }
+ }
+ 
+diff --git a/plugins/dsh-flow/test/graph.test.ts b/plugins/dsh-flow/test/graph.test.ts
+index 1db7c13..bc54a0e 100644
+--- a/plugins/dsh-flow/test/graph.test.ts
++++ b/plugins/dsh-flow/test/graph.test.ts
+@@ -176,6 +176,7 @@ test('waitingForConfirm is true only when a confirm request is pending', () => {
+       notes: [],
+       updatedAt: '',
+       attempts: 0,
++      scopeKind: 'exclusive',
+     }],
+     confirm,
+   })
+diff --git a/plugins/dsh-flow/test/tools-schema.test.ts b/plugins/dsh-flow/test/tools-schema.test.ts
+index 61ec59a..4d24147 100644
+--- a/plugins/dsh-flow/test/tools-schema.test.ts
++++ b/plugins/dsh-flow/test/tools-schema.test.ts
+@@ -2,6 +2,8 @@ import { expect, test } from 'vitest'
+ 
+ import { defineTool } from '@just-genius/dsh-plugin-runtime/host'
+ 
++import { NODE_SCHEMA } from '../src/tools.ts'
++
+ /**
+  * Tool parameter schemas must compile under the real value-schema DSL.
+  *
+@@ -15,22 +17,12 @@ import { defineTool } from '@just-genius/dsh-plugin-runtime/host'
+  * The DSL compiles an array's `items` with `allowRequired: false`, so `required`
+  * is illegal inside any object that is itself an array item. Requiredness is
+  * described in prose and enforced in the argument parsers.
++ *
++ * `NODE_SCHEMA` is imported from the plugin source rather than duplicated here:
++ * a copy in this file could not catch drift in the real one, and drift is
++ * exactly what takes the profile down.
+  */
+ 
+-const NODE_SCHEMA = {
+-  type: 'object',
+-  additionalProperties: false,
+-  properties: {
+-    id: { type: 'string', description: 'Required. Stable unique id.' },
+-    title: { type: 'string', description: 'Required. One-line label.' },
+-    prompt: { type: 'string', description: 'Required. The brief.' },
+-    deps: { type: 'array', items: { type: 'string' }, description: 'Ids that must settle first.' },
+-    parentId: { type: 'string', description: 'Optional parent.' },
+-    persona: { type: 'string', description: 'Optional persona.' },
+-    confirm: { type: 'boolean', description: 'Optional human gate.' },
+-  },
+-}
+-
+ /** Compile one parameter map exactly as `defineTool` would at boot. */
+ function compile(parameters: Record<string, unknown>) {
+   return defineTool({
+@@ -51,6 +43,14 @@ test('flow.plan parameters compile', () => {
+   })).not.toThrow()
+ })
+ 
++test('the node schema carries writeScope, so a plan can declare its blast radius', () => {
++  // Without this field the scheduler and the guard would have nothing to read,
++  // and every plan would silently degrade to one step at a time.
++  const properties = (NODE_SCHEMA as { properties: Record<string, unknown> }).properties
++  expect(Object.keys(properties)).toContain('writeScope')
++  expect(properties['writeScope']).toMatchObject({ type: 'array', items: { type: 'string' } })
++})
++
+ test('flow.patch parameters compile', () => {
+   expect(() => compile({
+     ops: {
