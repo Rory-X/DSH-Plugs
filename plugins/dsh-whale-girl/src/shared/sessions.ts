@@ -18,6 +18,16 @@ export interface SessionView {
   title: string | null
   activity: string
   since: number
+  running?: boolean
+  updatedAt?: number
+  startedAt?: number
+  completedAt?: number
+  message?: string
+  prompt?: string
+  cwd?: string
+  parentId?: string
+  origin?: 'subagent'
+  activeToolCount?: number
 }
 
 export function parseSessionEvent(event: unknown):

@@ -11,7 +11,7 @@
       user-select: none; -webkit-user-select: none;
     }
     #stage {
-      position: fixed; left: 0; top: 0; bottom: 0; width: 160px;
+      position: fixed; left: var(--pet-x, 0px); top: var(--pet-y, 0px); height: 220px; width: 160px;
       display: grid; place-items: center;
       pointer-events: none;
       touch-action: none;
@@ -20,11 +20,13 @@
       pointer-events: auto;
       cursor: grab;
       image-rendering: pixelated;
+      touch-action: none;
+      -webkit-user-drag: none;
     }
-    canvas:active { cursor: grabbing; }
+    canvas:active, canvas.dragging { cursor: grabbing; }
     #bubble {
-      position: fixed; left: 80px; bottom: 96px;
-      transform: translateX(-50%);
+      position: fixed; left: calc(var(--pet-x, 0px) + 80px); top: calc(var(--pet-y, 0px) + 54px);
+      transform: translate(-50%, -100%);
       background: rgba(24,28,38,.94); color: #E8EBF2;
       font: 12px system-ui, sans-serif;
       padding: 6px 10px; border-radius: 10px;
@@ -34,9 +36,31 @@
       z-index: 10;
     }
     #bubble.show { opacity: 1; }
+    .pet-controls {
+      position: fixed; left: calc(var(--pet-x, 0px) + 52px); top: calc(var(--pet-y, 0px) + 222px);
+      display: flex; align-items: center; gap: 6px; z-index: 15;
+      -webkit-app-region: no-drag;
+    }
+    .pet-toggle {
+      position: relative; display: grid; place-items: center; box-sizing: border-box;
+      width: 25px; height: 25px; padding: 0; border: 1px solid rgba(190,207,233,.22);
+      border-radius: 8px; background: rgba(28,31,39,.78); color: #b6c4d9; cursor: pointer;
+      backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+      box-shadow: 0 2px 6px rgba(0,0,0,.2); touch-action: manipulation;
+    }
+    .pet-toggle:hover, .pet-toggle[aria-expanded="true"] { background: #354357; color: #f5d894; border-color: #6b819e; }
+    .pet-toggle:focus-visible { outline: 2px solid #9ecefa; outline-offset: 2px; }
+    .pet-toggle[data-status="running"]::after, .pet-toggle[data-status="waiting"]::after {
+      content: ""; position: absolute; right: -2px; top: -2px; width: 6px; height: 6px;
+      border: 2px solid #1c1f27; border-radius: 50%; background: #89c9ff;
+    }
+    .pet-toggle[data-status="waiting"]::after { background: #edc370; }
+    .pet-toggle > svg { width: 14px; height: 14px; }
+    button svg, .session-tree-icon { display: block; flex: none; }
     /* 右侧经验条：等级在上，横向条 + 本级数值 + 称号徽章 */
     #xp {
-      position: fixed; left: 158px; top: 50%;
+      position: fixed; left: var(--pet-panel-x, 168px); top: calc(var(--pet-y, 0px) + 110px);
+      width: var(--pet-panel-width, 114px);
       transform: translateY(-50%);
       display: flex; flex-direction: column; align-items: flex-start; gap: 3px;
       pointer-events: none; opacity: 0;
@@ -71,21 +95,21 @@
     #xp-note {
       color: rgba(232,235,242,.55);
       font: 9px/1.2 system-ui, sans-serif;
-      white-space: nowrap; max-width: 140px;
+      white-space: nowrap; max-width: 100%;
       overflow: hidden; text-overflow: ellipsis;
     }
     #xp-badges {
       display: none; flex-wrap: wrap; align-items: center; gap: 3px;
-      max-width: 140px; pointer-events: auto;
+      max-width: 100%; pointer-events: auto;
     }
     #xp-badges.show { display: flex; }
     .xp-badge {
-      width: 32px; height: 32px; padding: 0; border: 0; border-radius: 6px;
+      width: 24px; height: 24px; padding: 0; border: 0; border-radius: 6px;
       background: rgba(0,0,0,.35); cursor: help;
       display: grid; place-items: center; image-rendering: pixelated;
     }
     .xp-badge img {
-      width: 28px; height: 28px; object-fit: contain;
+      width: 20px; height: 20px; object-fit: contain;
       pointer-events: none; display: block;
     }
     .xp-badge:hover, .xp-badge:focus-visible {
@@ -107,16 +131,92 @@
       display: block; margin-top: 4px; color: #E8EBF2;
       font: 400 10px/1.35 system-ui, sans-serif; opacity: .92;
     }
+    .has-sessions #xp {
+      left: calc(var(--pet-panel-x, 168px) + 10px); top: calc(var(--pet-y, 0px) + 10px);
+      width: 100px; transform: none;
+    }
+    .has-sessions #xp-note, .has-sessions #xp-badges { display: none; }
+    [hidden] { display: none !important; }
+    .session-card, .session-list {
+      position: fixed; box-sizing: border-box; z-index: 5;
+      color: #f1f3f8; background: rgba(28, 31, 39, .97);
+      border: 1px solid rgba(190, 207, 233, .18); border-radius: 15px;
+      box-shadow: 0 4px 14px rgba(0, 0, 0, .28);
+      font-family: "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+      -webkit-app-region: no-drag;
+      --status-color: #89c9ff;
+    }
+    .session-card { height: 96px; padding: 8px 10px; overflow: hidden; }
+    .session-card[data-status="waiting"], .session-row[data-status="waiting"] { --status-color: #edc370; }
+    .session-card[data-status="error"], .session-row[data-status="error"] { --status-color: #fc91a0; }
+    .session-card[data-status="done"], .session-row[data-status="done"] { --status-color: #8dd5ac; }
+    .session-card[data-status="cancelled"], .session-card[data-status="offline"] { --status-color: #a4afc0; }
+    .session-card::after {
+      content: ""; position: absolute; bottom: 0; left: 0; width: 100%; height: 2px;
+      background: var(--status-color); opacity: .6;
+    }
+    .session-card[data-status="running"]::after {
+      width: 45%; background: linear-gradient(90deg, transparent, var(--status-color), transparent);
+      animation: session-progress 1.8s ease-in-out infinite;
+    }
+    @keyframes session-progress { from { transform: translateX(-100%); } to { transform: translateX(330%); } }
+    .session-top { display: flex; align-items: center; gap: 5px; height: 22px; font-size: 10px; color: #a8b5c8; }
+    .session-status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--status-color); flex: none; }
+    #session-status { min-width: 0; color: var(--status-color); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    #session-time { font-variant-numeric: tabular-nums; font-size: 10px; flex: none; }
+    .session-card button, .session-list button { font: inherit; cursor: pointer; color: inherit; }
+    #session-count {
+      margin-left: auto; flex: 0 1 auto; min-width: 0; max-width: 145px; height: 22px; padding: 0 7px;
+      border: 1px solid rgba(190,207,233,.10); border-radius: 7px; color: #b9c6d8; background: rgba(190,207,233,.05);
+      display: inline-flex; align-items: center; gap: 4px; font: 500 10px/1 system-ui, sans-serif; white-space: nowrap;
+    }
+    #session-count-label { overflow: hidden; text-overflow: ellipsis; }
+    #session-count svg { width: 10px; height: 10px; }
+    #session-count[aria-expanded="true"] svg { transform: rotate(180deg); }
+    #session-count:disabled svg { display: none; }
+    #session-count.attention { color: #edc370; background: rgba(237, 195, 112, .09); }
+    #session-count:disabled { cursor: default; }
+    .session-icon-button {
+      display: grid; place-items: center; box-sizing: border-box; flex: none; width: 24px; height: 24px; padding: 0;
+      border: 1px solid transparent; border-radius: 7px; background: transparent; color: #93a8c2;
+    }
+    .session-icon-button > svg, .session-jump > svg { width: 12px; height: 12px; }
+    .session-icon-button:hover, .session-jump:hover { background: rgba(190,207,233,.09); border-color: rgba(190,207,233,.15); }
+    #session-open { display: block; width: 100%; padding: 0; margin-top: 4px; border: 0; background: none; text-align: left; }
+    #session-title { display: block; font-size: 12px; line-height: 18px; font-weight: 600; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    #session-preview {
+      display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
+      color: #bdc7d7; font-size: 11px; line-height: 15px; margin-top: 3px; overflow-wrap: anywhere;
+    }
+    .session-list { padding: 3px 4px; overflow: auto; overscroll-behavior: contain; scrollbar-width: thin; scrollbar-color: #4c5667 transparent; }
+    .session-row { display: flex; align-items: center; height: 68px; box-sizing: border-box; border-radius: 10px; --status-color: #89c9ff; }
+    .session-row + .session-row { border-top: 1px solid rgba(180, 197, 222, .07); }
+    .session-row.selected { background: rgba(134, 180, 239, .095); }
+    .session-choose { flex: 1; min-width: 0; border: 0; background: none; padding: 6px 4px 6px calc(10px + var(--depth, 0) * 10px); text-align: left; }
+    .session-row-title, .session-row-preview, .session-row-meta { display: block; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+    .session-row-heading { display: flex; align-items: center; gap: 4px; min-width: 0; }
+    .session-tree-icon { color: #8395ac; }
+    .session-row-title { min-width: 0; font-size: 11px; line-height: 18px; font-weight: 600; }
+    .session-row-preview { color: #acb9cc; font-size: 10px; line-height: 16px; }
+    .session-row-meta { color: var(--status-color); font-size: 9px; line-height: 15px; }
+    .session-jump { display: grid; place-items: center; box-sizing: border-box; flex: none; width: 24px; height: 28px; padding: 0; margin-right: 4px; border: 1px solid transparent; border-radius: 7px; background: none; color: #93a8c2 !important; }
+    .session-card button:hover, .session-jump:hover { color: #fff !important; }
+    .session-card button:focus-visible, .session-list button:focus-visible { outline: 1px solid #9ecefa; outline-offset: 1px; border-radius: 5px; }
     @media (prefers-reduced-motion: reduce) {
       #xp-fill { transition: none; }
       #bubble, #xp { transition: none; }
+      .session-card::after { animation: none !important; }
     }
   </style>
 </head>
 <body>
   <div id="stage"><canvas id="pet" width="110" height="110"></canvas></div>
   <div id="bubble"></div>
-  <div id="xp" aria-hidden="true">
+  <div id="pet-controls" class="pet-controls" role="group" aria-label="桌宠面板" hidden>
+    <button id="session-toggle" class="pet-toggle" type="button" aria-label="展开会话" title="展开会话" aria-controls="session-strip session-list" aria-expanded="false"></button>
+    <button id="xp-toggle" class="pet-toggle" type="button" aria-label="展开等级和经验条" title="展开等级和经验条" aria-controls="xp" aria-expanded="false"></button>
+  </div>
+  <div id="xp" role="group" aria-label="等级和经验" hidden>
     <div id="xp-lv">Lv.1</div>
     <div id="xp-track"><div id="xp-fill"></div></div>
     <div id="xp-val">0 / 50</div>
@@ -124,6 +224,21 @@
     <div id="xp-badges"></div>
   </div>
   <div id="xp-tip" role="tooltip"></div>
+  <section id="session-strip" class="session-card" aria-label="会话进展" hidden>
+    <div class="session-top">
+      <span class="session-status-dot" aria-hidden="true"></span>
+      <span id="session-status" role="status" aria-live="polite"></span>
+      <span id="session-time"></span>
+      <button id="session-count" type="button" aria-controls="session-list" aria-expanded="false"><span id="session-count-label"></span></button>
+      <button id="session-open-icon" class="session-icon-button" type="button" aria-label="打开 DSH 主界面" title="打开 DSH 主界面"></button>
+      <button id="session-collapse" class="session-icon-button" type="button" aria-label="收起会话" title="收起会话"></button>
+    </div>
+    <button id="session-open" type="button">
+      <span id="session-title"></span>
+      <span id="session-preview"></span>
+    </button>
+  </section>
+  <div id="session-list" class="session-list" role="group" aria-label="进行中的会话" hidden></div>
   <script src="/whale-girl/overlay.js"></script>
 </body>
 </html>

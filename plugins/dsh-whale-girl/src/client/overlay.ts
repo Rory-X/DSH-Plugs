@@ -5,11 +5,18 @@ import {
   EVENTS_PATH,
   INTERACT_PATH,
   PRESENCE_PATH,
+  SESSIONS_PATH,
   STATE_PATH,
 } from '../shared/routes.ts'
 import { JOY_MS, TRANSIENT_MS, WAKE_MS, getCharacter, nextBlinkAt, nextFacingAt, nextWorkingRhythm, pickState, stateOf, wakeFromInteraction, type Character, type StateAnim } from '../shared/logic.ts'
 import { titleDef, titleDescription, titleIcon, titleName, xpFillAsset, xpProgress } from '../shared/pet-state.ts'
 import { bridge } from './bridge.ts'
+import { createAssetCache, startRecoverableInitialization } from './asset-cache.ts'
+import { createDragController, createLatestMoveQueue } from './drag-controller.ts'
+import { createSessionStrip } from './session-strip.ts'
+import { createDshIcon } from '@just-genius/dsh-plugin-ui/icons-dom'
+import { createPetPanelPreferences, petPanelVisibility, PET_PANEL_PREFERENCES_KEY } from '../shared/panel-preferences.ts'
+import { createPetPanelDock } from './panel-dock.ts'
 
 interface Snapshot {
   pet?: { level?: number; xp?: number; stats?: { tasksDone?: number }; titles?: string[] }
@@ -23,6 +30,7 @@ const overlays = () => bridge()?.overlays
 async function postJson(path: string, body: unknown): Promise<unknown> {
   const res = await fetch(path, {
     method: 'POST',
+    signal: AbortSignal.timeout(5000),
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
   })
@@ -31,7 +39,7 @@ async function postJson(path: string, body: unknown): Promise<unknown> {
 }
 
 async function getJson<T>(path: string): Promise<T> {
-  const res = await fetch(path, { cache: 'no-store' })
+  const res = await fetch(path, { cache: 'no-store', signal: AbortSignal.timeout(5000) })
   if (!res.ok) throw new Error(`${path} ${res.status}`)
   return res.json() as Promise<T>
 }
@@ -50,6 +58,14 @@ const xpVal = document.getElementById('xp-val') as HTMLElement
 const xpNote = document.getElementById('xp-note') as HTMLElement
 const xpBadges = document.getElementById('xp-badges') as HTMLElement
 const xpTip = document.getElementById('xp-tip') as HTMLElement
+const xpToggle = document.getElementById('xp-toggle') as HTMLButtonElement
+const panelPreferences = createPetPanelPreferences(() => localStorage)
+xpToggle.append(createDshIcon('IconSparkle16', 14))
+xpToggle.addEventListener('click', () => panelPreferences.toggle('statsExpanded'))
+const panelDock = createPetPanelDock(panelPreferences, 'pet-controls session-strip session-list xp')
+panelDock.element.id = 'pet-dock'
+panelDock.element.style.cssText = 'position:fixed;left:calc(var(--pet-x, 0px) + 56px);top:calc(var(--pet-y, 0px) + 198px);'
+document.getElementById('pet-controls')!.before(panelDock.element)
 const maybeCtx = canvas.getContext('2d')
 if (maybeCtx === null) throw new Error('no canvas')
 const ctx: CanvasRenderingContext2D = maybeCtx
@@ -125,7 +141,21 @@ function renderTitleBadges(ids: string[] | undefined): void {
 let manifest: unknown = null
 let character: Character | null = null
 let characterId = 'whale-girl'
-const sheetCache = new Map<string, { img: HTMLImageElement; w: number; h: number; rendered?: boolean } | null>()
+interface SpriteSheet { img: HTMLImageElement; w: number; h: number; rendered?: boolean }
+const sheetCache = createAssetCache<SpriteSheet>(async key => {
+  const response = await fetch(`${ASSETS_PATH}/characters/${key}`, { signal: AbortSignal.timeout(5000) })
+  if (!response.ok) throw new Error(`sprite request failed (${response.status}): ${key}`)
+  const url = URL.createObjectURL(await response.blob())
+  try {
+    const img = new Image()
+    img.src = url
+    await img.decode()
+    if (img.naturalWidth === 0 || img.naturalHeight === 0) throw new Error(`empty sprite: ${key}`)
+    return { img, w: img.naturalWidth, h: img.naturalHeight }
+  } finally {
+    URL.revokeObjectURL(url)
+  }
+}, { onError: (key, error) => console.warn('[whale-girl] sprite load failed', key, error) })
 let animState = 'idle'
 let frame = 0
 let frameDir = 1
@@ -152,10 +182,17 @@ const sched = {
 }
 
 function applySize(size = config.size): void {
-  canvas.width = size
-  canvas.height = size
+  // Assigning canvas dimensions clears its pixels, even when the value is unchanged.
+  if (canvas.width !== size || canvas.height !== size) {
+    canvas.width = size
+    canvas.height = size
+  }
   canvas.style.width = `${size}px`
   canvas.style.height = `${size}px`
+  canvas.style.opacity = String(config.opacity)
+  ctx.imageSmoothingEnabled = false
+  drawFrame()
+  void reportHitarea()
 }
 
 function sheetKey(sheet: string): string {
@@ -167,24 +204,7 @@ function framesOf(cfg: StateAnim): number {
 }
 
 async function ensureSheet(cfg: StateAnim): Promise<{ img: HTMLImageElement; w: number; h: number } | null> {
-  const key = sheetKey(cfg.sheet)
-  if (sheetCache.has(key)) return sheetCache.get(key) ?? null
-  const res = await fetch(`${ASSETS_PATH}/characters/${characterId}/${cfg.sheet}`)
-  if (!res.ok) {
-    sheetCache.set(key, null)
-    return null
-  }
-  const blob = await res.blob()
-  const img = new Image()
-  const url = URL.createObjectURL(blob)
-  await new Promise<void>((resolve, reject) => {
-    img.onload = () => resolve()
-    img.onerror = () => reject(new Error('sheet load failed'))
-    img.src = url
-  })
-  const entry = { img, w: img.naturalWidth, h: img.naturalHeight }
-  sheetCache.set(key, entry)
-  return entry
+  return sheetCache.load(sheetKey(cfg.sheet))
 }
 
 function drawPlaceholder(): void {
@@ -243,33 +263,19 @@ async function switchAnim(name: string): Promise<void> {
 
 async function reportHitarea(): Promise<void> {
   const api = overlays()
-  const cfg = stateOf(character, animState)
-  const entry = cfg ? sheetCache.get(sheetKey(cfg.sheet)) : null
-  if (!cfg || !entry || api === undefined) {
-    await api?.setIgnoreMouseEvents(OVERLAY, true, { forward: true })
-    return
-  }
-  const frameW = Math.floor(entry.w / framesOf(cfg))
-  const off = document.createElement('canvas')
-  off.width = frameW
-  off.height = entry.h
-  const octx = off.getContext('2d')
-  if (octx === null) return
-  octx.drawImage(entry.img, frame * frameW, 0, frameW, entry.h, 0, 0, frameW, entry.h)
-  const data = octx.getImageData(0, 0, frameW, entry.h).data
-  let minX = Infinity, minY = Infinity, maxX = -1, maxY = -1
-  for (let y = 0; y < entry.h; y++) {
-    for (let x = 0; x < frameW; x++) {
-      if (data[(y * frameW + x) * 4 + 3] > 24) {
-        if (x < minX) minX = x
-        if (x > maxX) maxX = x
-        if (y < minY) minY = y
-        if (y > maxY) maxY = y
-      }
+  if (!api) return
+  try {
+    // A loading/empty animation frame must not disable mouse input for the
+    // entire widget. The canvas remains the stable drag and interaction target.
+    await api.setIgnoreMouseEvents(OVERLAY, false)
+    if (api.setDragRegions && api.onDrag && api.cancelDrag) {
+      const { x, y, width, height } = canvas.getBoundingClientRect()
+      await api.setDragRegions(OVERLAY, [{ x, y, width, height }])
+      nativeDragReady = true
     }
+  } catch (error) {
+    console.warn('[whale-girl] pointer region update failed', error)
   }
-  // Empty sheet → click-through; otherwise the canvas itself is the hit target.
-  await api.setIgnoreMouseEvents(OVERLAY, maxX < 0, { forward: true })
 }
 
 function tickFrame(now: number): void {
@@ -340,7 +346,7 @@ function loop(now: number): void {
     tickFrame(now)
     tickFacing(now, cfg)
   }
-  if (animState === 'walk' && walkDir !== 0 && now - lastWalkStepAt >= 50) {
+  if (!pointerHeld && !sessionStrip?.inspecting && animState === 'walk' && walkDir !== 0 && now - lastWalkStepAt >= 50) {
     lastWalkStepAt = now
     const dx = Math.round(config.walk.speedPxPerSec * 0.05 * walkDir)
     void overlays()?.move(OVERLAY, { dx, dy: 0 }).then((hit) => {
@@ -358,7 +364,18 @@ function showBubble(text: string): void {
 }
 
 function renderBadge(): void {
-  if (!snapshot) { xpRoot.classList.remove('show'); return }
+  const expanded = petPanelVisibility(panelPreferences.getSnapshot()).stats
+  xpToggle.setAttribute('aria-expanded', String(expanded))
+  const toggleLabel = `${expanded ? '收起' : '展开'}等级和经验条`
+  xpToggle.setAttribute('aria-label', toggleLabel)
+  xpToggle.title = toggleLabel
+  xpRoot.hidden = !expanded
+  xpRoot.classList.toggle('show', expanded)
+  if (!expanded) {
+    xpTip.classList.remove('show')
+    xpTip.textContent = ''
+  }
+  if (!snapshot) { xpNote.textContent = '状态加载中…'; return }
   const p = snapshot.pet
   const prog = xpProgress(p?.xp ?? 0)
   xpLv.textContent = prog.maxed ? `Lv.${prog.level} MAX` : `Lv.${prog.level}`
@@ -371,7 +388,6 @@ function renderBadge(): void {
   if (snapshot.activity?.sessionThink) bits.push('思考中')
   xpNote.textContent = bits.join(' · ')
   renderTitleBadges(p?.titles)
-  xpRoot.classList.add('show')
 }
 
 function stepScheduler(now: number): void {
@@ -381,10 +397,11 @@ function stepScheduler(now: number): void {
     sched.transient = null
     if (wasFun) sched.joyUntil = now + JOY_MS
   }
-  const isActive = act.name !== 'idle' || act.until > now
+  const isActive = act.name !== 'idle' || act.until > now || act.sessionThink === true || act.sessionWait === true
+    || (sessionStrip?.activeCount ?? 0) > 0
   if (isActive) sched.idleSince = 0
   else if (sched.idleSince === 0) sched.idleSince = now
-  sched.sleeping = act.name === 'idle' && sched.idleSince !== 0 && now - sched.idleSince > sched.sleepAfterMs
+  sched.sleeping = !isActive && sched.idleSince !== 0 && now - sched.idleSince > sched.sleepAfterMs
   if (act.sessionThink !== true) {
     if (sched.working.active || sched.working.until !== 0) sched.working = { active: false, until: 0 }
   } else if (sched.working.until === 0 || now >= sched.working.until) {
@@ -395,7 +412,7 @@ function stepScheduler(now: number): void {
       sched.walking = false
       sched.nextWalkAt = now + rand(config.walk.minWaitMs, config.walk.maxWaitMs)
     }
-  } else if (!sched.sleeping && act.name === 'idle' && config.walk.enabled) {
+  } else if (!isActive && !sessionStrip?.inspecting && !sched.sleeping && act.name === 'idle' && config.walk.enabled) {
     if (sched.nextWalkAt === 0) sched.nextWalkAt = now + rand(config.walk.minWaitMs, config.walk.maxWaitMs)
     if (now >= sched.nextWalkAt) {
       sched.walking = true
@@ -416,8 +433,8 @@ function currentAnim(now = Date.now()): string {
     sleeping: sched.sleeping,
     joyUntil: sched.joyUntil,
     now,
-    sessionThink: act.sessionThink === true,
-    sessionWait: act.sessionWait === true,
+    sessionThink: act.sessionThink === true || (sessionStrip?.activeCount ?? 0) > 0,
+    sessionWait: act.sessionWait === true || (sessionStrip?.waitingCount ?? 0) > 0,
     workingActive: sched.working.active,
     celebrateUntil: act.turnCompletedUntil ?? 0,
   })
@@ -471,64 +488,146 @@ async function heartbeat(online: boolean): Promise<void> {
 }
 
 let dragging = false
-let lastEngineAnim = 'idle'
-let dragStart: { x: number; y: number; moved: boolean; px: number; py: number } | null = null
+let pointerHeld = false
+let pointerId: number | undefined
+let pointerNative = false
+let nativeDragReady = false
+let lastPointerX = 0
+let sessionStrip: ReturnType<typeof createSessionStrip> | undefined
 
-canvas.addEventListener('pointerdown', (e) => {
-  dragStart = { x: e.screenX, y: e.screenY, moved: false, px: e.screenX, py: e.screenY }
-  canvas.setPointerCapture(e.pointerId)
+function releasePointer(): void {
+  const id = pointerId
+  pointerId = undefined
+  if (id !== undefined && canvas.hasPointerCapture(id)) canvas.releasePointerCapture(id)
+}
+
+function pressPet(): void {
+  pointerHeld = true
+  sched.walking = false
+  canvas.classList.add('dragging')
+}
+
+function startPetDrag(): void {
+  dragging = true
+  void switchAnim('drag')
+}
+
+function finishPetDrag(): void {
+  releasePointer()
+  pointerHeld = false
+  dragging = false
+  sched.walking = false
+  sched.sleeping = false
+  sched.idleSince = Date.now()
+  sched.nextWalkAt = Date.now() + rand(config.walk.minWaitMs, config.walk.maxWaitMs)
+  canvas.classList.remove('dragging')
+  void switchAnim(currentAnim())
+  void fallbackMoves.idle().then(() => sessionStrip?.settleLayout())
+}
+
+function clickPet(): void {
+  const action = sessionStorage.getItem('wg:lastAction') === 'feed' ? 'play' : 'feed'
+  sessionStorage.setItem('wg:lastAction', action)
+  void interact(action)
+}
+
+const fallbackMoves = createLatestMoveQueue(
+  point => overlays()?.move(OVERLAY, point) ?? Promise.resolve(),
+  error => console.warn('[whale-girl] drag move failed', error),
+)
+const fallbackDrag = createDragController({
+  move: point => fallbackMoves.push(point),
+  start: startPetDrag,
+  finish: cancelled => { if (cancelled) fallbackMoves.clear(); finishPetDrag() },
+  click: clickPet,
 })
-canvas.addEventListener('pointermove', (e) => {
-  if (!dragStart) return
-  const dx = e.screenX - dragStart.x
-  const dy = e.screenY - dragStart.y
-  if (!dragStart.moved && Math.hypot(dx, dy) > 6) {
-    dragStart.moved = true
-    dragStart.px = e.screenX
-    dragStart.py = e.screenY
-    dragging = true
-    lastEngineAnim = animState
-    void switchAnim('drag')
+const offNativeDrag = overlays()?.onDrag?.(event => {
+  if (event.id !== OVERLAY) return
+  if (event.phase === 'start') {
+    nativeDragReady = true
+    pointerNative = true
+    pressPet()
   }
-  if (dragStart.moved) {
-    const ddx = e.screenX - dragStart.px
-    const ddy = e.screenY - dragStart.py
-    if (ddx !== 0 || ddy !== 0) {
-      const nextFlip = ddx < 0 ? 1 : -1
-      if (nextFlip !== flip) {
-        flip = nextFlip
-        drawFrame()
-        void reportHitarea()
-      }
-      void overlays()?.move(OVERLAY, { dx: ddx, dy: ddy })
-      dragStart.px = e.screenX
-      dragStart.py = e.screenY
-    }
+  else if (event.phase === 'move') startPetDrag()
+  else {
+    finishPetDrag()
+    if (event.phase === 'end' && !event.dragged) clickPet()
   }
 })
-canvas.addEventListener('pointerup', () => {
-  if (dragStart && !dragStart.moved) {
-    const action = sessionStorage.getItem('wg:lastAction') === 'feed' ? 'play' : 'feed'
-    sessionStorage.setItem('wg:lastAction', action)
-    void interact(action)
-  }
-  if (dragging) {
-    dragging = false
-    const woke = wakeFromInteraction({ sleeping: sched.sleeping })
-    sched.sleeping = woke.sleeping
-    sched.idleSince = Date.now()
-    void switchAnim(lastEngineAnim)
-  }
-  dragStart = null
+
+canvas.addEventListener('pointerdown', e => {
+  if (e.button !== 0 || !e.isPrimary || pointerId !== undefined) return
+  e.preventDefault()
+  pointerId = e.pointerId
+  pointerNative = nativeDragReady && e.pointerType === 'mouse'
+  lastPointerX = e.screenX
+  pressPet()
+  try { canvas.setPointerCapture(e.pointerId) } catch { /* window-level release still works */ }
+  if (!pointerNative) fallbackDrag.begin({ x: e.screenX, y: e.screenY }, { x: window.screenX, y: window.screenY })
 })
+window.addEventListener('pointermove', e => {
+  if (pointerId !== e.pointerId) return
+  if (!pointerNative) fallbackDrag.update({ x: e.screenX, y: e.screenY })
+  if (dragging && e.screenX !== lastPointerX) {
+    const nextFlip = e.screenX < lastPointerX ? 1 : -1
+    if (nextFlip !== flip) { flip = nextFlip; drawFrame() }
+  }
+  lastPointerX = e.screenX
+})
+window.addEventListener('pointerup', e => {
+  if (pointerId !== e.pointerId) return
+  if (pointerNative) releasePointer()
+  else fallbackDrag.end({ x: e.screenX, y: e.screenY })
+})
+function cancelPetDrag(): void {
+  if (pointerNative) overlays()?.cancelDrag?.(OVERLAY)
+  fallbackDrag.cancel()
+  fallbackMoves.clear()
+  finishPetDrag()
+}
+canvas.addEventListener('lostpointercapture', e => { if (pointerId === e.pointerId) cancelPetDrag() })
+window.addEventListener('pointercancel', e => { if (pointerId === e.pointerId) cancelPetDrag() })
+window.addEventListener('blur', () => { if (pointerHeld) cancelPetDrag() })
+window.addEventListener('resize', () => { void reportHitarea() })
+window.addEventListener('pagehide', () => {
+  overlays()?.cancelDrag?.(OVERLAY)
+  offNativeDrag?.()
+  fallbackMoves.clear()
+  sessionStrip?.dispose()
+  offPanelPreferences()
+  panelDock.dispose()
+  window.removeEventListener('storage', onPanelStorage)
+})
+
+sessionStrip = createSessionStrip({
+  api: overlays,
+  load: () => getJson(SESSIONS_PATH),
+  preferences: panelPreferences,
+  isDragging: () => pointerHeld || dragging,
+  onLayout: () => { void reportHitarea() },
+  onInspect: inspecting => {
+    sched.walking = false
+    if (!inspecting) sched.nextWalkAt = Date.now() + rand(config.walk.minWaitMs, config.walk.maxWaitMs)
+  },
+  notice: showBubble,
+})
+
+const offPanelPreferences = panelPreferences.subscribe(renderBadge)
+const onPanelStorage = (event: StorageEvent) => {
+  if (event.key === PET_PANEL_PREFERENCES_KEY || event.key === null) panelPreferences.reload()
+}
+window.addEventListener('storage', onPanelStorage)
+renderBadge()
 
 setInterval(() => {
   const now = Date.now()
   stepScheduler(now)
-  if (!dragging) void switchAnim(currentAnim(now))
+  if (!pointerHeld && !dragging) void switchAnim(currentAnim(now))
 }, 250)
 
-void (async () => {
+drawPlaceholder()
+canvas.setAttribute('aria-label', '桌面宠物')
+const stopInitialization = startRecoverableInitialization(async () => {
   applySize()
   manifest = await getJson(`${ASSETS_PATH}/manifest.json`)
   const parsed = getCharacter(manifest, (manifest as { default?: string })?.default ?? characterId)
@@ -536,15 +635,32 @@ void (async () => {
     character = parsed
     characterId = parsed.id
   }
-  await refresh()
+  const initial = stateOf(character, 'idle')
+  if (!initial) throw new Error('pet manifest has no idle animation')
+  if (!await ensureSheet(initial)) throw new Error('pet sprite is not ready')
+  canvas.setAttribute('aria-label', character?.name ?? '桌面宠物')
+  await Promise.all([refresh(), sessionStrip?.refresh()])
+  if (!config.enabled) return
   await heartbeat(true)
   await switchAnim(currentAnim())
+  drawFrame()
   requestAnimationFrame(loop)
-  setInterval(() => { void refresh() }, config.pollMs)
+  setInterval(() => { void refresh(); void sessionStrip?.refresh() }, config.pollMs)
   setInterval(() => { void heartbeat(true) }, HEARTBEAT_MS)
   try {
     const sse = new EventSource(EVENTS_PATH)
-    sse.onmessage = () => { void refresh() }
+    sse.onmessage = event => {
+      let sessionsOnly = false
+      try { sessionsOnly = JSON.parse(event.data).type === 'sessions' } catch { /* full refresh */ }
+      if (!sessionsOnly) void refresh()
+      void sessionStrip?.refresh()
+    }
+    window.addEventListener('pagehide', () => sse.close())
   } catch { /* poll fallback */ }
   window.addEventListener('pagehide', () => { void heartbeat(false) })
-})()
+}, error => {
+  console.warn('[whale-girl] initialization failed; retrying', error)
+  drawPlaceholder()
+  showBubble('桌宠暂时加载失败，正在重试…')
+})
+window.addEventListener('pagehide', stopInitialization)

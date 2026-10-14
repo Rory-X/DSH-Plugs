@@ -22,7 +22,13 @@
   "dsh": {
     "client": {
       "inject": [
-        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-api-session-controller",
+        "@deepseek-ai/dsh-api-workspace-controller",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-chat",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-session",
+        "@deepseek-ai/dsh-client-ui-workspace",
         "@deepseek-ai/dsh-client-locale",
         "@deepseek-ai/dsh-client-ui-settings",
         "@deepseek-ai/dsh-client-ui-settings-plugins"
@@ -45,9 +51,10 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsdown -c tsdown.config.ts && tsdown -c tsdown.client.config.ts && tsdown -c tsdown.overlay.config.ts && cp src/overlay.html lib/overlay.html && (test -f lib/overlay.js || mv lib/overlay.iife.js lib/overlay.js)",
+    "build": "tsdown -c tsdown.config.ts && tsdown -c tsdown.overlay.config.ts && node scripts/copy-overlay.mjs && tsdown -c tsdown.client.config.ts",
     "watch": "tsdown -c tsdown.config.ts --watch & tsdown -c tsdown.client.config.ts --watch & tsdown -c tsdown.overlay.config.ts --watch",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run test",
     "clean": "rm -rf lib"
   },
   "dependencies": {

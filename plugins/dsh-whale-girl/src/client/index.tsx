@@ -5,12 +5,15 @@ import { OVERLAY_PATH } from '../shared/routes.ts'
 import { bridge } from './bridge.ts'
 import { PetCard } from './card.tsx'
 import { apply as mountInPage } from './pet.mjs'
+import { installSessionOwner } from './session-owner.ts'
 
 export const name = 'dsh-whale-girl'
 export const inject = [
   CLIENT_SERVICES.slots,
   CLIENT_SERVICES.locale,
   CLIENT_SERVICES.settingsScope,
+  CLIENT_SERVICES.sessions,
+  CLIENT_SERVICES.uiSession,
 ] as const
 
 const NS = 'whale-girl'
@@ -73,7 +76,7 @@ function mountOverlay(): () => void {
     contributor: CONTRIBUTOR,
     id: OVERLAY_ID,
     url: OVERLAY_PATH,
-    bounds: { width: 290, height: 220 },
+    bounds: { width: overlays.update ? 176 : 290, height: 252 },
     chrome: {
       transparent: true,
       frame: false,
@@ -103,6 +106,7 @@ function mountPet(): () => void {
 export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, 'zh', zh), 'dsh-whale-girl: zh dictionary')
   ctx.effect(() => ctx.locale.register(NS, 'en', en), 'dsh-whale-girl: en dictionary')
+  ctx.effect(() => installSessionOwner(ctx), 'dsh-whale-girl: session strip navigation')
 
   const scope = getSettingsScope(ctx).bind<WhaleGirlConfig>({ namespace: NAMESPACE })
   ctx.slots.inject('settings.plugin.item', () =>

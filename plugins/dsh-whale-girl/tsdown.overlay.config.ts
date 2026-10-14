@@ -7,9 +7,10 @@ export default defineConfig({
   outDir: 'lib',
   clean: false,
   platform: 'browser',
-  deps: { neverBundle: true },
+  deps: { neverBundle: true, alwaysBundle: ['@just-genius/dsh-plugin-ui/icons-dom'] },
   outExtensions: () => ({ js: '.js' }),
   outputOptions: {
     name: 'WhaleGirlOverlay',
+    entryFileNames: 'overlay.js',
   },
 })

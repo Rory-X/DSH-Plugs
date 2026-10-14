@@ -14,6 +14,9 @@ import { TRANSIENT_MS, WAKE_MS, JOY_MS, ROUND_CELEBRATE_MS, pickState, nextWorki
 import { STATE_PATH, INTERACT_PATH, CONFIG_PATH, ASSETS_PATH, EVENTS_PATH } from '../shared/routes.ts'
 import { DEFAULTS } from '../shared/config.ts'
 import { xpProgress, xpFillAsset, hudUrl, titleDef, titleIcon, titleName, titleDescription } from '../shared/pet-state.ts'
+import { createDshIcon } from '@just-genius/dsh-plugin-ui/icons-dom'
+import { createPetPanelPreferences, petPanelVisibility, PET_PANEL_PREFERENCES_KEY } from '../shared/panel-preferences.ts'
+import { createPetPanelDock } from './panel-dock.ts'
 
 const ASSETS_URL = ASSETS_PATH
 const MANIFEST_URL = `${ASSETS_URL}/manifest.json`
@@ -36,7 +39,7 @@ const CSS = `
 [data-whale-girl] .pet-stage { position: relative; width: var(--pet-size, 110px); height: var(--pet-size, 110px); display: grid; place-items: center;
   font-size: calc(var(--pet-size, 110px) * 0.4); line-height: 1; text-align: center;
   filter: drop-shadow(0 4px 6px rgba(0,0,0,.25));
-  pointer-events: none; /* 视觉层不拦事件——交互统一由 hitarea（贴合内容 bbox）承载，四周透明不可点 */
+  pointer-events: none; /* 视觉层不拦事件——交互统一由 hitarea（贴合内容 bbox）承载，四周透明不可点 */ }
 [data-whale-girl] .pet-effects { position: absolute; left: 0; top: 0; width: var(--pet-size, 110px); height: var(--pet-size, 110px);
   pointer-events: none; overflow: visible; z-index: 2; }
 [data-whale-girl] .pet-hitarea { position: absolute; inset: 0; width: var(--pet-size, 110px); height: var(--pet-size, 110px);
@@ -170,6 +173,9 @@ const CSS = `
   font-variant-numeric: tabular-nums; white-space: nowrap;
   text-shadow: 0 1px 2px rgba(0,0,0,.8);
 }
+[data-whale-girl] .pet-panel-toggle:hover { filter: brightness(1.2); }
+[data-whale-girl] .pet-panel-toggle:focus-visible { outline: 2px solid #9ecefa; outline-offset: 2px; }
+[data-whale-girl] button svg { display: block; flex: none; }
 @media (prefers-reduced-motion: reduce) {
   [data-whale-girl] .pet-stage { animation: none !important; }
   [data-whale-girl] .pet-sprite { animation: none !important; }
@@ -189,6 +195,7 @@ export function apply(ctx = {}) {
   // Runtime configuration belongs to this mounted instance. Keeping it local
   // prevents an unloaded/reloaded pet from inheriting another mount's state.
   let cfg = { ...CFG_DEFAULTS }
+  const panelPreferences = createPetPanelPreferences(() => localStorage)
   const style = document.createElement('style')
   style.textContent = CSS
   document.head.appendChild(style)
@@ -266,6 +273,7 @@ export function apply(ctx = {}) {
   // 状态卡（solid 面板：边框+阴影+blur；hover 显示，含子元素与贴边变体类）。
   const status = createPanel({ anchor: 'below', variant: 'solid', offsetY: 18, zIndex: '1' }).el
   status.className = 'pet-status'
+  status.id = 'whale-girl-status'
   status.style.backdropFilter = 'blur(10px) saturate(1.15)'
   status.style.padding = '5px 8px'
   status.style.minWidth = '96px'
@@ -374,15 +382,18 @@ export function apply(ctx = {}) {
   menu.style.padding = '6px'
   menu.style.display = 'none' // 初始隐藏；toggleMenu 切换内联
   menu.style.pointerEvents = 'auto' // 菜单按钮需可点（覆盖面板默认 pointer-events:none）
-  const BTN_STYLE = 'flex:1; border:0; border-radius:6px; padding:4px 8px; font-size:11px; cursor:pointer; background:rgba(255,255,255,.14); color:#E8EBF2; font-family:system-ui,sans-serif;'
+  const BTN_STYLE = 'display:inline-flex;align-items:center;justify-content:center;gap:5px;white-space:nowrap;flex:1;border:0;border-radius:6px;padding:4px 8px;font-size:11px;cursor:pointer;background:rgba(255,255,255,.14);color:#E8EBF2;font-family:system-ui,sans-serif;'
   const feedBtn = document.createElement('button')
-  feedBtn.textContent = '🍗 喂食'
+  feedBtn.type = 'button'
+  feedBtn.append(createDshIcon('IconLikeOutline16', 14), '喂食')
   feedBtn.style.cssText = BTN_STYLE
   const playBtn = document.createElement('button')
-  playBtn.textContent = '🎾 玩耍'
+  playBtn.type = 'button'
+  playBtn.append(createDshIcon('IconPlayOutline16', 14), '玩耍')
   playBtn.style.cssText = BTN_STYLE
   const roleBtn = document.createElement('button')
-  roleBtn.textContent = '🎭 换角色'
+  roleBtn.type = 'button'
+  roleBtn.append(createDshIcon('IconUserOutline16', 14), '换角色')
   roleBtn.style.cssText = BTN_STYLE
   menu.append(feedBtn, playBtn, roleBtn)
 
@@ -406,7 +417,8 @@ export function apply(ctx = {}) {
   // 右侧经验条：等级在上、横向条在下（E7 HUD 素材）；不挡交互。
   const xpHud = document.createElement('div')
   xpHud.className = 'pet-xp'
-  xpHud.setAttribute('aria-hidden', 'true')
+  xpHud.id = 'whale-girl-xp'
+  xpHud.setAttribute('role', 'group')
   xpHud.style.cssText = 'position:absolute; left:calc(100% + 6px); top:50%; transform:translateY(-50%); display:flex; flex-direction:column; align-items:flex-start; gap:3px; pointer-events:none; z-index:2; image-rendering:pixelated;'
   const xpLv = document.createElement('div')
   xpLv.className = 'pet-xp-lv'
@@ -424,7 +436,37 @@ export function apply(ctx = {}) {
   xpVal.style.cssText = 'color:rgba(232,235,242,.78); font-size:9px; line-height:1; font-variant-numeric:tabular-nums; white-space:nowrap; text-shadow:0 1px 2px rgba(0,0,0,.8);'
   xpVal.textContent = '0 / 50'
   xpHud.append(xpLv, xpTrack, xpVal)
-  host.append(effects, stage, hitarea, menu, xpHud)
+  const statsToggle = document.createElement('button')
+  statsToggle.type = 'button'
+  statsToggle.className = 'pet-panel-toggle'
+  statsToggle.id = 'whale-girl-controls'
+  statsToggle.setAttribute('aria-controls', 'whale-girl-xp whale-girl-status')
+  statsToggle.style.cssText = 'position:absolute;left:calc(50% - 12.5px);top:calc(100% + 28px);display:grid;place-items:center;width:25px;height:25px;box-sizing:border-box;padding:0;border:1px solid rgba(190,207,233,.2);border-radius:8px;background:rgba(28,31,39,.94);color:#b6c4d9;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,.2);pointer-events:auto;touch-action:manipulation;z-index:4;'
+  statsToggle.append(createDshIcon('IconSparkle16', 14))
+  const panelDock = createPetPanelDock(panelPreferences, 'whale-girl-controls whale-girl-xp whale-girl-status')
+  panelDock.element.style.cssText = 'left:calc(50% - 24px);top:calc(100% + 4px);'
+  host.append(effects, stage, hitarea, menu, xpHud, panelDock.element, statsToggle)
+  const layoutPanelControls = () => {
+    let rect = host.getBoundingClientRect()
+    const clearance = petPanelVisibility(panelPreferences.getSnapshot()).controls ? 61 : 32
+    const overflow = rect.bottom + clearance - window.innerHeight
+    if (overflow > 0 && !dragging) {
+      if (host.style.top && host.style.top !== 'auto') {
+        host.style.top = `${Math.max(0, rect.top - overflow)}px`
+        host.style.bottom = 'auto'
+      } else host.style.bottom = `${clearance}px`
+      rect = host.getBoundingClientRect()
+    }
+    const menuAbove = rect.bottom + clearance + (menu.offsetHeight || 36) > window.innerHeight - 8
+    menu.style.top = menuAbove ? 'auto' : `calc(100% + ${clearance}px)`
+    menu.style.bottom = menuAbove ? 'calc(100% + 12px)' : 'auto'
+    return rect
+  }
+  const isDockActive = () => panelDock.element.matches(':hover')
+    || document.hasFocus() && panelDock.element === document.activeElement
+  const pauseForDock = () => { if (walking) stopWalk() }
+  panelDock.element.addEventListener('pointerenter', pauseForDock)
+  panelDock.element.addEventListener('focus', pauseForDock)
 
   // ---- 状态卡布局（视口感知：左右对齐，hover 显示时调用）----
   // status 绝对定位锚定宠物下方（始终不覆盖角色）；宠物贴左右缘 → 边缘对齐防横向溢出。
@@ -432,6 +474,7 @@ export function apply(ctx = {}) {
   // 显式显示控制（内联 style，不依赖 CSS :hover 层叠——宿主环境可能覆盖样式）。
   let statusForcedHidden = false // 气泡/拖拽/菜单打开时 true（hover 不显示状态卡）
   const setStatusVisible = (visible) => {
+    visible = visible && petPanelVisibility(panelPreferences.getSnapshot()).stats
     status.style.opacity = visible ? '1' : '0'
     status.style.visibility = visible ? 'visible' : 'hidden'
     status.style.pointerEvents = visible ? 'auto' : 'none'
@@ -440,7 +483,7 @@ export function apply(ctx = {}) {
       : 'opacity .15s ease-out, visibility 0s linear .2s'
   }
   const layoutStatus = () => {
-    if (activeBubble !== null || dragging || menu.classList.contains('open')) {
+    if (!petPanelVisibility(panelPreferences.getSnapshot()).stats || activeBubble !== null || dragging || menu.classList.contains('open')) {
       statusForcedHidden = true
       setStatusVisible(false) // 气泡/拖拽/菜单打开时隐藏状态卡（内联控制，不依赖 CSS 类）
       return
@@ -455,7 +498,7 @@ export function apply(ctx = {}) {
     // 对齐策略（v6）：状态卡始终以角色中心居中（left:50% + translateX(-50%)），
     // 不做左右贴边——宠物在视口边缘时卡轻微溢出可接受（max-width 缓解）。
     // 仅保留「贴底翻转」：宠物贴视口底部时卡翻到角色上方（防底部溢出/被裁）。
-    const nearBottom = rect.bottom > vh - cardH - 20
+    const nearBottom = rect.bottom > vh - cardH - 72
     status.style.left = '50%'
     status.style.right = 'auto'
     status.style.bottom = 'auto'
@@ -467,7 +510,7 @@ export function apply(ctx = {}) {
       status.style.bottom = 'calc(100% + 18px)'
     } else {
       status.classList.remove('pet-status-above')
-      status.style.top = 'calc(100% + 18px)'
+      status.style.top = 'calc(100% + 70px)'
     }
   }
   const onHostEnter = () => {
@@ -493,6 +536,7 @@ export function apply(ctx = {}) {
     // .pet-menu.open 类——toggle class 不足以显示/隐藏菜单）。显式切换内联。
     menu.style.display = next ? 'flex' : 'none'
     if (next) {
+      layoutPanelControls()
       statusForcedHidden = true
       setStatusVisible(false)
       releaseInteraction() // 打开菜单 = 用户在场：重置空闲（菜单开着宠物不睡）；睡着则醒
@@ -566,6 +610,8 @@ export function apply(ctx = {}) {
 
   // ---- 渲染 ----
   const renderStatus = () => {
+    const hostRect = layoutPanelControls()
+    panelDock.element.dataset.status = sessionMood.waiting ? 'waiting' : sessionMood.thinking ? 'running' : 'idle'
     if (pet) {
       metaLv.textContent = `Lv.${pet.level}`
       // 任务计数：徽章与统计由内联 flex gap 分隔（宿主覆盖也不粘连误读）。
@@ -589,7 +635,6 @@ export function apply(ctx = {}) {
           : `等级 ${prog.level}，经验 ${prog.into} / ${prog.need}`,
       )
       // 贴右缘时经验条翻到角色左侧，避免出屏。
-      const hostRect = host.getBoundingClientRect()
       const needW = (xpTrack.offsetWidth || 72) + 10
       if (hostRect.right + needW > window.innerWidth - 8) {
         xpHud.style.left = 'auto'
@@ -602,6 +647,39 @@ export function apply(ctx = {}) {
       }
     }
   }
+
+  const syncPanelPreferences = () => {
+    const visible = petPanelVisibility(panelPreferences.getSnapshot())
+    const expanded = visible.stats
+    statsToggle.hidden = !visible.controls
+    statsToggle.style.display = visible.controls ? 'grid' : 'none'
+    const label = `${expanded ? '收起' : '展开'}等级和经验条`
+    statsToggle.setAttribute('aria-expanded', String(expanded))
+    statsToggle.setAttribute('aria-label', label)
+    statsToggle.title = label
+    statsToggle.style.background = expanded ? '#354357' : 'rgba(28,31,39,.94)'
+    statsToggle.style.color = expanded ? '#f5d894' : '#b6c4d9'
+    xpHud.style.display = expanded ? 'flex' : 'none'
+    xpHud.setAttribute('aria-hidden', String(!expanded))
+    renderStatus()
+    if (!visible.controls) toggleMenu(false)
+    if (!expanded) {
+      setStatusVisible(false)
+      metaBadgeTip.style.display = 'none'
+      metaBadgeTip.classList.remove('show')
+    } else {
+      if (host.matches(':hover') || host.contains(document.activeElement)) onHostEnter()
+    }
+  }
+  statsToggle.addEventListener('click', () => {
+    panelPreferences.toggle('statsExpanded')
+    releaseInteraction()
+  })
+  const offPanelPreferences = panelPreferences.subscribe(syncPanelPreferences)
+  const onPanelStorage = (event) => {
+    if (event.key === PET_PANEL_PREFERENCES_KEY || event.key === null) panelPreferences.reload()
+  }
+  window.addEventListener('storage', onPanelStorage)
 
   // 缺素材占位（v5：不再 emoji 降级——manifest 门禁保证投放前 15 状态全有 sheet；
   // 仅运行时异常路径（sheet 加载失败/迟到）到此，显示透明占位 + 控制台警告便于发现）。
@@ -1276,6 +1354,7 @@ export function apply(ctx = {}) {
       moved = false // 收尾完成：releasePointerCapture 会触发 lostpointercapture，moved 归零防重复收尾
     }
     layoutStatus() // 拖拽结束：状态卡恢复（若仍在 hover）
+    layoutPanelControls()
     // 点菜单按钮不切换菜单（按钮的 click 触发互动）。
     if (!wasMoved && !e.target.closest('button')) toggleMenu()
   })
@@ -1361,7 +1440,7 @@ export function apply(ctx = {}) {
     if (!cfg.walk.enabled) return // 游走开关关闭：不排程（walk.enabled 配置）
     const wait = cfg.walk.minWaitMs + Math.random() * (cfg.walk.maxWaitMs - cfg.walk.minWaitMs)
     wanderTimer = setTimeout(() => {
-      if (sleeping || sessionMood.thinking || sessionMood.waiting) {
+      if (sleeping || sessionMood.thinking || sessionMood.waiting || isDockActive()) {
         scheduleWander() // 睡着了或会话活跃（思考陪伴/等待批准）不走，延后重排
         return
       }
@@ -1390,7 +1469,7 @@ export function apply(ctx = {}) {
     host.style.right = 'auto'
     host.style.bottom = 'auto'
     const step = (t) => {
-      if (sleeping || dragging || sessionMood.thinking || sessionMood.waiting) {
+      if (sleeping || dragging || sessionMood.thinking || sessionMood.waiting || isDockActive()) {
         stopWalk()
         return
       }
@@ -1442,6 +1521,7 @@ export function apply(ctx = {}) {
     }
     if (config !== null) applyClientConfig(config)
     host.style.display = ''
+    layoutPanelControls()
     loadAssets()
     refresh()
     pollTimer = setInterval(refresh, cfg.pollMs)
@@ -1484,12 +1564,14 @@ export function apply(ctx = {}) {
 
   // 窗口缩放后把已拖拽的位置重新 clamp 进视口，并重算状态卡布局（视口边界变化）。
   const onResize = () => {
-    if (!host.style.left) return // 默认右下角锚定无需处理
-    const x = Math.max(0, Math.min(parseFloat(host.style.left) || 0, window.innerWidth - host.offsetWidth))
-    const y = Math.max(0, Math.min(parseFloat(host.style.top) || 0, window.innerHeight - host.offsetHeight))
-    host.style.left = `${x}px`
-    host.style.top = `${y}px`
+    if (host.style.left) {
+      const x = Math.max(0, Math.min(parseFloat(host.style.left) || 0, window.innerWidth - host.offsetWidth))
+      const y = Math.max(0, Math.min(parseFloat(host.style.top) || 0, window.innerHeight - host.offsetHeight))
+      host.style.left = `${x}px`
+      host.style.top = `${y}px`
+    }
     layoutStatus()
+    layoutPanelControls()
   }
   window.addEventListener('resize', onResize)
 
@@ -1552,10 +1634,14 @@ export function apply(ctx = {}) {
     document.removeEventListener('whale-girl:status', onPetStatus)
     host.removeEventListener('mouseenter', onHostEnter)
     host.removeEventListener('mouseleave', onHostLeave)
+    offPanelPreferences()
+    panelDock.dispose()
+    window.removeEventListener('storage', onPanelStorage)
     window.removeEventListener('resize', onResize)
     host.remove()
     style.remove()
   }
+  syncPanelPreferences()
   return dispose
 }
 

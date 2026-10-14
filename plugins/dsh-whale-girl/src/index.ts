@@ -5,7 +5,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@just-genius/dsh-plugin-runtime/host'
 import type { Session } from '@just-genius/dsh-plugin-runtime/host'
 import { Schema } from '@just-genius/dsh-plugin-runtime/host'
-import { installSettingsSection } from '@just-genius/dsh-plugin-runtime/host'
+import { installSettingsSection, sessionEvents } from '@just-genius/dsh-plugin-runtime/host'
 import { HOST_SERVICES, HttpInputError, readJsonBody, sendJson } from '@just-genius/dsh-plugin-runtime/host'
 import {
   BODY_LIMIT,
@@ -31,7 +31,8 @@ import {
   turnCompletionSnapshot,
 } from './shared/activity.ts'
 import { applyAction, isCrossOrigin } from './shared/interact.ts'
-import { applySessionView, createSessionView, parseTurnEvent, titleFromLog, type SessionView } from './shared/sessions.ts'
+import { parseTurnEvent, type SessionView } from './shared/sessions.ts'
+import { SessionTracker, type SessionMeta } from './session-tracker.ts'
 import { contentTypeFor, sanitizeAssetPath } from './shared/assets.ts'
 import {
   ASSETS_PATH,
@@ -152,11 +153,19 @@ export async function apply(ctx: Context): Promise<void> {
   }
 
   const sseClients = new Set<ServerResponse>()
-  const broadcastEvent = () => {
-    const line = 'data: {"type":"event"}\n\n'
-    for (const res of sseClients) {
-      try { res.write(line) } catch { sseClients.delete(res) }
-    }
+  let broadcastTimer: ReturnType<typeof setTimeout> | null = null
+  let broadcastFull = false
+  const broadcastEvent = (type: 'event' | 'sessions' = 'event') => {
+    if (type === 'event') broadcastFull = true
+    if (broadcastTimer !== null) return
+    broadcastTimer = setTimeout(() => {
+      broadcastTimer = null
+      const line = `data: ${JSON.stringify({ type: broadcastFull ? 'event' : 'sessions' })}\n\n`
+      broadcastFull = false
+      for (const res of sseClients) {
+        try { res.write(line) } catch { sseClients.delete(res) }
+      }
+    }, 120)
   }
 
   const known = new Map<string, string>()
@@ -170,12 +179,9 @@ export async function apply(ctx: Context): Promise<void> {
   let sessionThink = false
   let sessionWait = false
   let turnCompletedUntil = 0
-  const activeTurns = new Map<string, number>()
-  const sessionViews = new Map<string, SessionView>()
+  const tracker = new SessionTracker()
 
   const resolveSessionTitle = (s: Session): string | null => {
-    const fromLog = titleFromLog(Array.isArray(s.events) ? s.events : [])
-    if (fromLog !== null) return fromLog
     try {
       const snapshot = ctx.sessionTitle.get(s)
       return typeof snapshot?.title === 'string' && snapshot.title !== '' ? snapshot.title : null
@@ -184,38 +190,42 @@ export async function apply(ctx: Context): Promise<void> {
     }
   }
 
-  const sessionUpdate = () => {
-    try {
-      let thinking = false
-      for (const session of ctx.sessions.list()) {
-        if ((activeTurns.get(session.id) ?? 0) > 0) thinking = true
-      }
-      sessionThink = thinking
-    } catch {
-      // keep last
-    }
+  const metaOf = (session: Session): SessionMeta => ({
+    id: session.id, createdAt: session.header.createdAt, title: resolveSessionTitle(session),
+    cwd: session.header.cwd, parentId: session.header.parentSession, origin: session.header.origin,
+  })
+  const ensureSession = (session: Session): SessionMeta => {
+    const meta = metaOf(session)
+    if (!tracker.has(session.id)) {
+      const agent = ctx.agents.get(session.id)
+      tracker.seed(meta, sessionEvents(session), agent ? agent.status === 'running' : undefined)
+    } else tracker.metadata(meta)
+    return meta
   }
 
   const sessionsSnapshot = (): SessionView[] => {
     try {
-        const live = new Set<string>()
-        for (const session of ctx.sessions.list()) {
-          const id = session.id
-          live.add(id)
-          const since = session.header.createdAt
-          const title = resolveSessionTitle(session)
-          const knownView = sessionViews.get(id)
-          if (knownView === undefined) sessionViews.set(id, { id, title, activity: 'done', since })
-          else if (knownView.title === null && title !== null) sessionViews.set(id, { ...knownView, title })
-        }
-        for (const id of sessionViews.keys()) if (!live.has(id)) sessionViews.delete(id)
+      const live = new Set<string>()
+      for (const session of ctx.sessions.list()) {
+        live.add(session.id)
+        const meta = ensureSession(session)
+        const agent = ctx.agents.get(session.id)
+        if (agent) tracker.reconcile(meta, agent.status === 'running')
+      }
+      for (const view of tracker.snapshot()) if (!live.has(view.id)) tracker.remove(view.id)
     } catch {
       // keep event views
     }
-    return [...sessionViews.values()]
+    return tracker.snapshot()
+  }
+  const sessionUpdate = () => {
+    const views = sessionsSnapshot()
+    sessionThink = views.some(view => view.running)
+    sessionWait = views.some(view => view.activity === 'waiting')
   }
 
   const activity = () => {
+    sessionUpdate()
     const now = Date.now()
     const tasks = collectTasks(ctx.jobs, ctx.agents)
     const derived = deriveActivity({ tasks, nowMs: now, known, wasWorking, errorMs: configRef.errorMs })
@@ -295,26 +305,32 @@ export async function apply(ctx: Context): Promise<void> {
   })
 
   ctx.on('session/event', (session, event) => {
-    const id = session.id
-    const knownView = sessionViews.get(id)
-    const since = knownView?.since ?? session.header.createdAt
-    const base = knownView ?? { ...createSessionView(id, since), title: null }
-    const view = applySessionView(base, event)
-    if (knownView === undefined || view !== knownView) sessionViews.set(id, view)
+    const changed = tracker.event(ensureSession(session), event)
     const parsed = parseTurnEvent(event)
-    if (parsed === null) return
-    if (parsed.kind === 'start') {
-      activeTurns.set(id, (activeTurns.get(id) ?? 0) + 1)
-      sessionWait = false
+    if (parsed !== null) {
+      if (parsed.kind === 'end' && tracker.snapshot().some(view => view.id === session.id && view.activity === 'done')) {
+        turnCompletedUntil = Math.max(turnCompletedUntil, Date.now() + TURN_COMPLETED_MS)
+      }
       sessionUpdate()
-    } else {
-      const n = (activeTurns.get(id) ?? 0) - 1
-      if (n <= 0) activeTurns.delete(id)
-      else activeTurns.set(id, n)
-      turnCompletedUntil = Math.max(turnCompletedUntil, Date.now() + TURN_COMPLETED_MS)
-      sessionWait = parsed.blocked
+      broadcastEvent()
+    } else if (changed) broadcastEvent('sessions')
+  })
+  ctx.on('agent/assistant-stream', ({ agent, frame }) => {
+    if (tracker.stream(ensureSession(agent.session), frame)) broadcastEvent('sessions')
+  })
+  ctx.on('agent/status', ({ agent, status }) => {
+    if (tracker.status(ensureSession(agent.session), status === 'running')) {
       sessionUpdate()
+      broadcastEvent()
     }
+  })
+  ctx.on('session/created', session => {
+    tracker.remove(session.id)
+    ensureSession(session)
+    broadcastEvent('sessions')
+  })
+  ctx.on('session/disposed', session => {
+    tracker.remove(session.id)
     broadcastEvent()
   })
 
@@ -488,6 +504,9 @@ export async function apply(ctx: Context): Promise<void> {
     ]
     return () => {
       if (saveTimer !== null) clearTimeout(saveTimer)
+      if (broadcastTimer !== null) clearTimeout(broadcastTimer)
+      for (const res of sseClients) res.end()
+      sseClients.clear()
       void store.save(state).catch(() => undefined)
       for (const dispose of disposers) dispose()
     }

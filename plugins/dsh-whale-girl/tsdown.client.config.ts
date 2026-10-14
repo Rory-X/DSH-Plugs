@@ -16,7 +16,7 @@ export default defineConfig({
   // shared UI package so it is inlined into this bundle (never a runtime dep).
   deps: {
     neverBundle: true,
-    alwaysBundle: ['@just-genius/dsh-plugin-ui', /^@just-genius\/dsh-plugin-runtime(?:\/|$)/],
+    alwaysBundle: [/^@just-genius\/dsh-plugin-ui(?:\/|$)/, /^@just-genius\/dsh-plugin-runtime(?:\/|$)/],
   },
   outExtensions: () => ({ js: '.js', dts: '.d.ts' }),
   banner: {
