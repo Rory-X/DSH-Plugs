@@ -6,6 +6,7 @@ import type {
   SettingsScope,
 } from '@just-genius/dsh-plugin-runtime/client'
 import type { IApiClient } from '@just-genius/dsh-plugin-runtime/client'
+import { getPendingInteractions } from '@just-genius/dsh-plugin-runtime/client'
 import { IconSideChatColor16 } from '@just-genius/dsh-plugin-ui'
 import type { DshCodexConfig } from '../../../shared/config'
 import type { CodexKey } from '../../locales'
@@ -61,6 +62,7 @@ export function createSideChatFeature(
     activate() {
       ensureSideChatStyles()
       const sessions = ctx.sessions as unknown as SideChatSessionsFace
+      const pendingInteractions = getPendingInteractions(ctx)
       const api = connectionApiOf(ctx) as IApiClient | undefined
       const modelDirectories = modelDirectoriesOf(ctx)
       const imageApi = remoteSessionApiOf(ctx) ?? api
@@ -93,6 +95,7 @@ export function createSideChatFeature(
                   tabKey: key,
                   initialSideSessionId: state?.sideSessionId,
                   sessions,
+                  pendingInteractions,
                   api: imageApi,
                   uiConversation,
                   modelDirectories,

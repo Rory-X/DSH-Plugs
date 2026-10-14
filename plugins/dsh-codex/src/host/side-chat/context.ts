@@ -15,7 +15,7 @@
  * as plugin-formed context rather than user speech.
  */
 
-import { createUserMessage } from '@just-genius/dsh-plugin-runtime/host'
+import { createUserMessage, sessionEvents } from '@just-genius/dsh-plugin-runtime/host'
 import type { Session, SessionEvent, UserMessage } from '@just-genius/dsh-plugin-runtime/host'
 
 /** Soft cap on the digest, in characters of rendered text. */
@@ -101,6 +101,7 @@ function recentTurns(parent: Session): DigestTurn[] {
 
 /** The parent's committed events, read defensively across session shapes. */
 function sessionEventsOf(parent: Session): readonly unknown[] {
+  if (typeof parent.snapshotEvents === 'function') return sessionEvents(parent)
   const candidate = parent as unknown as { events?: unknown; log?: { events?: unknown } }
   const events = candidate.events ?? candidate.log?.events
   return Array.isArray(events) ? events : []

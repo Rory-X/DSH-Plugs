@@ -2,12 +2,12 @@
 //
 // Owns a WebSocket endpoint (`/dsh-codex/terminal/ws`) backed by the DSH
 // subprocess seam's `spawnTerminal` primitive. One browser connection is one
-// interactive login shell on a real PTY.
+// interactive shell on a real PTY (ConPTY on Windows).
 //
 // Like Warp, the prompt shown in the UI is rendered by the client itself from
 // structured context (cwd / git / node version / duration), not by the shell.
-// The shell's own PS1 is suppressed (PS1='') and its prompt hook
-// (PROMPT_COMMAND in bash, precmd in zsh) emits
+// The shell's own prompt is suppressed, and its prompt hook
+// (PowerShell prompt, PROMPT_COMMAND in bash, or precmd in zsh) emits
 // `ESC]777;warp-block-end;<exit>;<cwd>BEL` before every prompt, which closes
 // the current command block and reports the shell's current directory. After
 // each block-end the host recomputes the context (git branch/status, node
@@ -20,10 +20,10 @@ import { HOST_SERVICES, readJsonBody, sendJson } from '@just-genius/dsh-plugin-r
 import { execFile } from 'node:child_process'
 import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Duplex } from 'node:stream'
-import { basename } from 'node:path'
+import { StringDecoder } from 'node:string_decoder'
 import { promisify } from 'node:util'
 import { WebSocketServer, type WebSocket } from 'ws'
-import { DEFAULT_CONFIG, type DshCodexConfig, type TerminalShell } from '../../shared/config'
+import { DEFAULT_CONFIG, parseTerminalShell, type DshCodexConfig } from '../../shared/config'
 import {
   TERMINAL_TERMINATE_PATH,
   type BlockContext,
@@ -33,7 +33,9 @@ import {
 } from '../../shared/terminal-protocol'
 import { completeTerminalInput } from './completion'
 import { loadShellHistory } from './history'
-import { resizeSubprocessTerminal } from '../adapters/subprocess-terminal'
+import { resizeSubprocessTerminal, signalSubprocessTerminal } from '../adapters/subprocess-terminal'
+import { resolveTerminalShell, terminalShellKind, terminalWorkingDirectory } from './shell'
+import { powerShellArguments, powerShellCommand } from './powershell'
 
 export const name = 'dsh-codex-terminal'
 
@@ -43,11 +45,13 @@ export const inject = [HOST_SERVICES.subprocess, HOST_SERVICES.webServer] as con
 const execFileAsync = promisify(execFile)
 
 const BLOCK_END_PREFIX = '\x1b]777;warp-block-end;'
+const BLOCK_START_PREFIX = '\x1b]777;warp-block-start;'
 const NODE_VERSION_PREFIX = '\x1b]777;warp-node-version;'
 const CAPS_PREFIX = '\x1b]777;warp-caps;'
 const BEL = '\x07'
 const WS_PATH = '/dsh-codex/terminal/ws'
-const MARKER_PREFIXES = [BLOCK_END_PREFIX, NODE_VERSION_PREFIX, CAPS_PREFIX] as const
+const MARKER_PREFIXES = [BLOCK_END_PREFIX, BLOCK_START_PREFIX, NODE_VERSION_PREFIX, CAPS_PREFIX] as const
+const SHELL_READY_TIMEOUT_MS = 20_000
 const CONTEXT_TIMEOUT_MS = 2500
 /** How long a detached PTY outlives its socket, waiting for a reconnect. */
 const DETACH_GRACE_MS = 10 * 60 * 1000
@@ -88,6 +92,9 @@ export interface TerminalSession {
   historySent: boolean
   /** Shell confirmed bracketed-paste support via the warp-caps probe. */
   bracketedPaste: boolean
+  readyTimer?: ReturnType<typeof setTimeout>
+  pendingBlockEnd?: { exitCode: number; cwd: string }
+  blockEndTimer?: ReturnType<typeof setTimeout>
 }
 
 /** Handle the main thread can dispose to tear the whole server down. */
@@ -338,37 +345,32 @@ export async function openSession(
   }
   ws.once('close', onEarlyClose)
 
-  const shellName = shellPreference === 'auto' ? (process.env.SHELL || 'bash') : shellPreference
   let shell: string
   try {
-    shell = await ctx.subprocess.resolveExecutable(shellName)
+    shell = await resolveTerminalShell(ctx.subprocess, shellPreference)
   } catch (error) {
-    if (shellPreference === 'auto' && shellName !== 'bash') {
-      try {
-        shell = await ctx.subprocess.resolveExecutable('bash')
-      } catch (fallbackError) {
-        ws.off('close', onEarlyClose)
-        if (!disconnected) {
-          send(ws, { type: 'error', message: `shell unavailable: ${errorMessage(fallbackError)}` })
-          ws.close()
-        }
-        return undefined
-      }
-    } else {
-      ws.off('close', onEarlyClose)
-      if (!disconnected) {
-        send(ws, { type: 'error', message: `shell unavailable: ${errorMessage(error)}` })
-        ws.close()
-      }
-      return undefined
+    ws.off('close', onEarlyClose)
+    if (!disconnected) {
+      send(ws, { type: 'error', message: `shell unavailable: ${errorMessage(error)}` })
+      ws.close()
     }
+    return undefined
+  }
+
+  if (disconnected) {
+    ws.off('close', onEarlyClose)
+    return undefined
   }
 
   try {
     spawnedHandle = await ctx.subprocess.spawnTerminal({
-      argv: [shell, '-l'],
+      argv: [shell, ...(terminalShellKind(shell) === 'powershell' ? powerShellArguments() : ['-l'])],
       cwd,
-      env: { TERM: 'xterm-256color', COLORTERM: 'truecolor' },
+      env: {
+        TERM: 'xterm-256color', COLORTERM: 'truecolor',
+        // Git Bash's login profile otherwise changes cwd to the user's home.
+        ...(process.platform === 'win32' && terminalShellKind(shell) !== 'powershell' ? { CHERE_INVOKING: '1' } : {}),
+      },
       rows,
       cols,
       graceMs: 3000,
@@ -428,9 +430,17 @@ export async function openSession(
   }
   attachSocket(session, ws, registry, false)
 
+  session.readyTimer = setTimeout(() => {
+    if (session.closed || session.ready) return
+    deliver(session, { type: 'error', message: `shell initialization timed out: ${shell}. Check the shell profile or choose another shell in Codex settings.` })
+    closeSession(session)
+    registry.delete(session.id)
+  }, SHELL_READY_TIMEOUT_MS)
+
+  const decoder = new StringDecoder('utf8')
   handle.output.on('data', (chunk: Buffer | string) => {
     if (session.closed) return
-    const text = typeof chunk === 'string' ? chunk : chunk.toString('utf8')
+    const text = typeof chunk === 'string' ? chunk : decoder.write(chunk)
     onTerminalData(session, text)
   })
 
@@ -438,6 +448,9 @@ export async function openSession(
     .then((outcome) => {
       if (session.closed) return
       session.exited = true
+      clearTimeout(session.readyTimer)
+      const tail = decoder.end()
+      if (tail !== '') onTerminalData(session, tail)
       if (session.ready && session.pending.length > 0) {
         deliver(session, { type: 'output', text: session.pending })
         session.pending = ''
@@ -465,8 +478,14 @@ export async function openSession(
   // Configure the shell: quiet input echo, colored output, and a prompt hook
   // that reports the exit status and current directory. PS1 stays empty so
   // the shell itself draws no  the client renders the Warp-style one.
-  const setup = setupScript(shell)
-  await handle.write(setup)
+  if (terminalShellKind(shell) !== 'powershell') {
+    try {
+      await handle.write(setupScript(shell))
+    } catch (error) {
+      closeSession(session)
+      throw error
+    }
+  }
 
   if (session.closed) return undefined
   return session
@@ -482,14 +501,26 @@ function onClientMessage(session: TerminalSession, raw: unknown): void {
     return
   }
   switch (message.type) {
+    case 'command': {
+      if (!session.ready || typeof message.command !== 'string' || message.command.length > 1_048_576) break
+      session.promptBuf = ''
+      session.pending = ''
+      const powershell = terminalShellKind(session.shell) === 'powershell'
+      // PowerShell echoes its transport expression; expose output only after
+      // the command-start marker, leaving the user's command in the UI header.
+      session.mode = powershell ? 'prompt' : 'output'
+      const normalized = message.command.replace(/\r\n|\n/g, '\r')
+      const data = powershell ? powerShellCommand(message.command)
+        : (session.bracketedPaste && message.command.includes('\n') ? `\x1b[200~${normalized}\x1b[201~` : normalized) + '\r'
+      void session.handle.write(data).catch(error => {
+        deliver(session, { type: 'error', message: `terminal write failed: ${errorMessage(error)}` })
+        closeSession(session)
+      })
+      break
+    }
     case 'input': {
-      // Bytes buffered since the last block-end marker are the shell's own
-      // prompt (prompt frameworks redraw it from precmd, so PS1='' cannot
-      // suppress it). The client renders its own Warp-style prompt, so the
-      // shell prompt is discarded here and the mode switches back to output.
-      session.promptBuf = ""
-      session.mode = 'output'
-      session.pending = ""
+      // Foreground input and terminal-query replies must not erase a partial
+      // OSC marker that arrived in the previous PTY chunk.
       void session.handle.write(message.data).catch(() => {})
       break
     }
@@ -501,7 +532,7 @@ function onClientMessage(session: TerminalSession, raw: unknown): void {
         message.input.length > 32_768
       ) break
       const requestId = Math.floor(message.requestId)
-      void completeTerminalInput(message.input, message.cursor, session.cwd)
+      void completeTerminalInput(message.input, message.cursor, session.cwd, process.env, terminalShellKind(session.shell))
         .then((completion) => {
           if (session.closed) return
           deliver(session, { type: 'completion', requestId, ...completion })
@@ -520,8 +551,7 @@ function onClientMessage(session: TerminalSession, raw: unknown): void {
       break
     }
     case 'signal': {
-      void session.handle
-        .signalForeground(message.signal as SubprocessTerminalSignal)
+      void signalSubprocessTerminal(session.handle, message.signal as SubprocessTerminalSignal)
         .catch(() => {})
       break
     }
@@ -551,6 +581,8 @@ function onClientMessage(session: TerminalSession, raw: unknown): void {
 export function closeSession(session: TerminalSession): void {
   if (session.closed) return
   session.closed = true
+  clearTimeout(session.readyTimer)
+  clearTimeout(session.blockEndTimer)
   if (session.detachTimer !== undefined) {
     clearTimeout(session.detachTimer)
     session.detachTimer = undefined
@@ -609,7 +641,8 @@ function deliver(session: TerminalSession, message: ServerMessage): void {
  * keeps bootstrap out of the user's HISTFILE.
  */
 export function setupScript(shell: string): string {
-  const name = basename(shell)
+  const name = terminalShellKind(shell)
+  const workingDirectory = process.platform === 'win32' ? '$(pwd -W 2>/dev/null || pwd)' : '$PWD'
   const quiet = (line: string) => ' ' + line
   const lines: string[] = name === 'zsh'
     ? ['setopt HIST_IGNORE_SPACE']
@@ -625,14 +658,14 @@ export function setupScript(shell: string): string {
   if (name === 'zsh') {
     lines.push(
       quiet('printf \'\\e]777;warp-caps;bracketed-paste=%s\\a\' "$(zle -l bracketed-paste >/dev/null 2>&1 && echo 1 || echo 0)"'),
-      quiet('dsh_block_mark() { printf \'\\e]777;warp-block-end;%s;%s\\a\' "$?" "$PWD" }'),
+      quiet(`dsh_block_mark() { printf '\\e]777;warp-block-end;%s;%s\\a' "$?" "${workingDirectory}" }`),
       quiet('precmd_functions+=dsh_block_mark'),
     )
   } else {
     lines.push(
       quiet('bind "set enable-bracketed-paste on" 2>/dev/null'),
       quiet('printf \'\\e]777;warp-caps;bracketed-paste=%s\\a\' "$(bind -v 2>/dev/null | grep -q "enable-bracketed-paste on" && echo 1 || echo 0)"'),
-      quiet('PROMPT_COMMAND=\'printf "\\e]777;warp-block-end;%s;%s\\a" "$?" "$PWD"\'"${PROMPT_COMMAND:+;$PROMPT_COMMAND}"'),
+      quiet(`PROMPT_COMMAND='printf "\\e]777;warp-block-end;%s;%s\\a" "$?" "${workingDirectory}"'"\${PROMPT_COMMAND:+;$PROMPT_COMMAND}"`),
     )
   }
   return lines.join('\n') + '\n'
@@ -644,9 +677,10 @@ export function onTerminalData(session: TerminalSession, chunk: string): void {
 
   for (;;) {
     const blockIndex = session.pending.indexOf(BLOCK_END_PREFIX)
+    const startIndex = session.pending.indexOf(BLOCK_START_PREFIX)
     const nodeIndex = session.pending.indexOf(NODE_VERSION_PREFIX)
     const capsIndex = session.pending.indexOf(CAPS_PREFIX)
-    if (blockIndex === -1 && nodeIndex === -1 && capsIndex === -1) {
+    if (blockIndex === -1 && startIndex === -1 && nodeIndex === -1 && capsIndex === -1) {
       const keep = possibleMarkerSuffixLength(session.pending)
       const safeLength = session.pending.length - keep
       if (safeLength > 0) {
@@ -658,7 +692,11 @@ export function onTerminalData(session: TerminalSession, chunk: string): void {
     }
 
     let markerIndex = blockIndex
-    let kind: 'block-end' | 'node-version' | 'caps' = 'block-end'
+    let kind: 'block-end' | 'block-start' | 'node-version' | 'caps' = 'block-end'
+    if (startIndex !== -1 && (markerIndex === -1 || startIndex < markerIndex)) {
+      markerIndex = startIndex
+      kind = 'block-start'
+    }
     if (nodeIndex !== -1 && (markerIndex === -1 || nodeIndex < markerIndex)) {
       markerIndex = nodeIndex
       kind = 'node-version'
@@ -674,14 +712,22 @@ export function onTerminalData(session: TerminalSession, chunk: string): void {
     const prefixLength =
       kind === 'block-end'
         ? BLOCK_END_PREFIX.length
-        : kind === 'node-version'
-          ? NODE_VERSION_PREFIX.length
-          : CAPS_PREFIX.length
+        : kind === 'block-start'
+          ? BLOCK_START_PREFIX.length
+          : kind === 'node-version'
+            ? NODE_VERSION_PREFIX.length
+            : CAPS_PREFIX.length
     const belIndex = session.pending.indexOf(BEL, prefixLength)
     if (belIndex === -1) return
 
     const payload = session.pending.slice(prefixLength, belIndex)
     session.pending = session.pending.slice(belIndex + 1)
+
+    if (kind === 'block-start') {
+      session.mode = 'output'
+      session.promptBuf = ''
+      continue
+    }
 
     if (kind === 'node-version') {
       const version = payload.trim()
@@ -697,11 +743,12 @@ export function onTerminalData(session: TerminalSession, chunk: string): void {
     const separator = payload.indexOf(';')
     if (separator === -1) continue
     const exitCode = Number.parseInt(payload.slice(0, separator).trim(), 10)
-    const cwd = payload.slice(separator + 1).trim()
+    const cwd = terminalWorkingDirectory(payload.slice(separator + 1).trim())
     if (Number.isNaN(exitCode)) continue
 
     if (session.ready === false) {
       session.ready = true
+      clearTimeout(session.readyTimer)
       if (cwd.length > 0) session.cwd = cwd
       deliver(session, {
         type: 'ready',
@@ -714,9 +761,14 @@ export function onTerminalData(session: TerminalSession, chunk: string): void {
       sendHistoryIfReady(session)
       void updateContext(session)
     } else {
-      if (cwd.length > 0) session.cwd = cwd
-      deliver(session, { type: 'block-end', exitCode })
-      void updateContext(session)
+      if (process.platform === 'win32') {
+        // ConPTY can pass an OSC through before it flushes the preceding
+        // screen update. Keep those final bytes in the command's output.
+        session.pendingBlockEnd = { exitCode, cwd }
+        scheduleBlockEnd(session)
+        continue
+      }
+      finishBlock(session, exitCode, cwd)
     }
     session.mode = 'prompt'
     session.promptBuf = ""
@@ -751,6 +803,25 @@ function emitOutput(session: TerminalSession, text: string): void {
     return
   }
   deliver(session, { type: 'output', text })
+  if (session.pendingBlockEnd !== undefined) scheduleBlockEnd(session)
+}
+
+function scheduleBlockEnd(session: TerminalSession): void {
+  clearTimeout(session.blockEndTimer)
+  session.blockEndTimer = setTimeout(() => {
+    const pending = session.pendingBlockEnd
+    session.pendingBlockEnd = undefined
+    if (session.closed || pending === undefined) return
+    finishBlock(session, pending.exitCode, pending.cwd)
+  }, 40)
+}
+
+function finishBlock(session: TerminalSession, exitCode: number, cwd: string): void {
+  if (cwd.length > 0) session.cwd = cwd
+  deliver(session, { type: 'block-end', exitCode })
+  session.mode = 'prompt'
+  session.promptBuf = ''
+  void updateContext(session)
 }
 
 /**
@@ -777,16 +848,16 @@ async function getGitInfo(
     const { stdout: branchOut } = await execFileAsync(
       'git',
       ['rev-parse', '--abbrev-ref', 'HEAD'],
-      { cwd, timeout: CONTEXT_TIMEOUT_MS },
+      { cwd, timeout: CONTEXT_TIMEOUT_MS, windowsHide: true },
     )
     const branch = branchOut.trim()
     if (branch.length === 0) return {}
 
     const [statusOut, numstatOut] = await Promise.all([
-      execFileAsync('git', ['status', '--porcelain'], { cwd, timeout: CONTEXT_TIMEOUT_MS })
+      execFileAsync('git', ['status', '--porcelain'], { cwd, timeout: CONTEXT_TIMEOUT_MS, windowsHide: true })
         .then((r) => r.stdout)
         .catch(() => ''),
-      execFileAsync('git', ['diff', '--numstat', 'HEAD', '--'], { cwd, timeout: CONTEXT_TIMEOUT_MS })
+      execFileAsync('git', ['diff', '--numstat', 'HEAD', '--'], { cwd, timeout: CONTEXT_TIMEOUT_MS, windowsHide: true })
         .then((r) => r.stdout)
         .catch(() => ''),
     ])
@@ -821,10 +892,6 @@ function send(ws: WebSocket, message: ServerMessage): void {
   } catch {
     // socket already closing
   }
-}
-
-function parseTerminalShell(value: string | null): TerminalShell | undefined {
-  return value === 'auto' || value === 'bash' || value === 'zsh' ? value : undefined
 }
 
 function parseSessionId(value: string | null): string | undefined {

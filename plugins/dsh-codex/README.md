@@ -8,7 +8,7 @@ Codex-style additions for DSH: Side Chat, Terminal, and Git mounted into DSH's o
 - **Files** — the workspace tree stays with DSH. `dsh-resource://file/**` uses DSH's viewer by default; the retained Codex preview can be enabled from Codex settings for comparison.
 - **Retained custom tabs** — DSH's disposable active-body seat only hosts a mount point. Side Chat, Terminal, Changes, Graph, and the optional custom Files bodies keep their actual React roots and DOM across tab switches, pane moves, dock/float changes, and Session switches; their official `tab.signal` is the sole tab-close lifetime.
 - **Side Chat** — opens an independent temporary agent beside the current task, optionally seeded with a digest of the main conversation. Its first user message becomes the official tab title, and closing the tab disposes the side session through `tab.signal`.
-- **Terminal panel** — Warp-style blocks backed by a real login-shell PTY over WebSocket (`/dsh-codex/terminal/ws`), with completions, history, ghost hints, and full-screen program (vim/htop) alt-screen support. Aborting its official `tab.signal` terminates the PTY.
+- **Terminal panel** — Warp-style blocks backed by a real PTY over WebSocket (`/dsh-codex/terminal/ws`), with completions, history, ghost hints, and full-screen program (vim/htop) alt-screen support. Windows automatically uses PowerShell 7 or Windows PowerShell; macOS/Linux use a login shell. Aborting its official `tab.signal` terminates the PTY.
 - **Git graph panel** — read-only commit graph walking `git log` (`/dsh-codex/git-graph`), with lane layout, branch filter, and a commit context menu (copy, checkout, branch, cherry-pick, revert, reset).
 
 ## Design
@@ -25,6 +25,18 @@ Codex-style additions for DSH: Side Chat, Terminal, and Git mounted into DSH's o
 - Sidebar layout and tab state follow DSH's official per-session lifecycle; this plugin keeps no parallel shell or launcher state.
 
 ## Develop
+
+On Windows, **Settings → Codex → Shell → Automatic** prefers PowerShell 7 and
+falls back to Windows PowerShell 5.1, including standard installation paths
+when PATH is incomplete. Both are also selectable explicitly. Bash selects
+Git Bash from PATH or its installation directory; the Windows WSL launcher
+`System32/bash.exe` is not treated as Git Bash. Open a new terminal tab after
+changing shells; existing tabs retain their running processes.
+
+PowerShell profiles are loaded. The terminal supports UTF-8 output, Windows
+paths, history suggestions from PSReadLine, multiline submissions, persistent variables and
+working directories, command exit status, and Ctrl+C. Startup failures stop
+automatic retries and can be retried after fixing the selected shell.
 
 ```sh
 pnpm install

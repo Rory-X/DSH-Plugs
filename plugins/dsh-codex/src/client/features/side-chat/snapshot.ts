@@ -28,6 +28,7 @@ export interface SnapshotNodeLike {
 export interface ChatLike {
   order?: readonly string[]
   nodes?: { get(key: string): SnapshotNodeLike | undefined }
+  legacy?: { runningCalls?: readonly import('@just-genius/dsh-plugin-runtime/client').RunningToolCall[] }
 }
 
 /**

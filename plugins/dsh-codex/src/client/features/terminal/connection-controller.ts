@@ -122,6 +122,12 @@ export class TerminalConnectionController {
         } else if (message.type === 'exit') {
           this.exited = true
           this.callbacks.onState('disconnected')
+        } else if (message.type === 'error') {
+          // Startup failures need an explicit retry after configuration is
+          // fixed; repeatedly respawning a missing shell cannot recover.
+          this.exited = true
+          this.rejectGates(new Error(message.message))
+          this.callbacks.onState('disconnected')
         }
         this.callbacks.onMessage(message)
       } catch (error) {

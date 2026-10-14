@@ -243,7 +243,6 @@ export function WarpTerminalView(props: WarpTerminalViewProps) {
   const lastSentDimsRef = useRef('')
   // Reported by the host's setup probe: the shell's line editor accepts
   // bracketed paste, so multi-line submissions can arrive as one buffer.
-  const shellBracketedPasteRef = useRef(false)
   const handleServerMessageRef = useRef((m: ServerMessage) => { void m })
   const connectionRef = useRef<TerminalConnectionController | null>(null)
   connectionRef.current ??= new TerminalConnectionController({
@@ -653,7 +652,6 @@ export function WarpTerminalView(props: WarpTerminalViewProps) {
   const handleServerMessage = useCallback((message: ServerMessage) => {
     switch (message.type) {
       case 'ready':
-        shellBracketedPasteRef.current = message.bracketedPaste
         setError(null)
         requestAnimationFrame(() => sendResizeRef.current())
         break
@@ -822,7 +820,7 @@ export function WarpTerminalView(props: WarpTerminalViewProps) {
       // program enabled bracketed paste (Warp's needs_bracketed_paste).
       const grid = gridsRef.current.get(running)
       const wrap = command.includes('\n') && (grid?.term.modes.bracketedPasteMode ?? false)
-      const message: ClientMessage = { type: 'input', data: pasteInputBytes(command, wrap) + '\n' }
+      const message: ClientMessage = { type: 'input', data: pasteInputBytes(command, wrap) + '\r' }
       if (!connection.send(message)) return
       rebuildDoc()
       schedulePaint()
@@ -842,7 +840,7 @@ export function WarpTerminalView(props: WarpTerminalViewProps) {
     // command's whole output burst (echo + erase sequences) plus the
     // block-end it still produces are swallowed. Covers terminfo entries
     // whose clear is only H+ED2 (no ED 3 for the stream interception).
-    if (command.trim() === 'clear') {
+    if (['clear', 'cls', 'clear-host'].includes(command.trim().toLowerCase())) {
       clearTranscript()
       pendingClearsRef.current += 1
       clearDropModeRef.current = 'all'
@@ -869,14 +867,9 @@ export function WarpTerminalView(props: WarpTerminalViewProps) {
     }
     draftRef.current = ''
     setDraft('')
-    // A multi-line submission wrapped in bracketed paste is accepted by the
-    // shell's line editor as ONE buffer: it executes as a single command with
-    // a single prompt cycle, so the block model gets exactly one block-end.
-    // Unwrapped, each \n is an accept-line and later lines' output would
-    // leak past the completed block. Without shell support, fall back to the
-    // raw stream (line-by-line execution, as before).
-    const wrap = command.includes('\n') && shellBracketedPasteRef.current
-    const message: ClientMessage = { type: 'input', data: pasteInputBytes(command, wrap) + '\n' }
+    // The host uses the selected shell's submission protocol: bracketed paste
+    // for POSIX editors, one dot-sourced script block for PowerShell.
+    const message: ClientMessage = { type: 'command', command }
     if (!connection.send(message)) return
     rebuildDoc()
     schedulePaint()

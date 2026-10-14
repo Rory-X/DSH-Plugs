@@ -15,7 +15,8 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
-import type { ConversationSnapshot } from '@just-genius/dsh-plugin-runtime/client'
+import type { ConversationSnapshot, PendingInteractionsSource, SessionId } from '@just-genius/dsh-plugin-runtime/client'
+import { adaptPendingInteraction } from '@just-genius/dsh-plugin-runtime/client'
 import { sideChatApi, SideChatDisabledError } from './api'
 import { chatRowsOf } from './snapshot'
 import type {
@@ -37,7 +38,7 @@ interface Observable<T> {
 /** Minimal session face the panel uses (structural subset of SessionFace). */
 export interface SideChatSession {
   sessionId?: string
-  open(): Promise<void>
+  open?(): Promise<void>
   subscribe(fn: () => void): () => void
   getSnapshot(): ConversationSnapshot
   prompt(content: readonly unknown[], mode: 'queue' | 'steer'): Promise<unknown>
@@ -90,6 +91,7 @@ export interface SideChatPanelProps {
   /** The occurrence's already-owned side session id, if its body remounts. */
   initialSideSessionId?: string
   sessions: SideChatSessionsFace
+  pendingInteractions?: PendingInteractionsSource
   /**
    * The legacy `connection.api` face, kept only for attachment reads. DSH
    * 0.1.2 removed its `sessions.*` RPCs, so it no longer serves the model
@@ -117,6 +119,7 @@ export function SideChatPanel({
   tabKey,
   initialSideSessionId,
   sessions,
+  pendingInteractions,
   api,
   uiConversation,
   modelDirectories,
@@ -199,13 +202,23 @@ export function SideChatPanel({
   const binding = sideSessionId === null ? undefined : sessions.binding(sideSessionId)
   const session = binding?.session
   useEffect(() => {
-    if (session !== undefined) void session.open()
+    if (session !== undefined) void session.open?.()
   }, [session])
 
   const snapshot = useSyncExternalStore<ConversationSnapshot | undefined>(
     (fn) => (session === undefined ? () => {} : session.subscribe(fn)),
     () => (session === undefined ? undefined : session.getSnapshot()),
   )
+
+  const pendingSnapshot = useSyncExternalStore(
+    (fn) => pendingInteractions?.subscribe(fn) ?? (() => {}),
+    () => pendingInteractions?.getSnapshot(),
+  )
+  const pending = useMemo(() => {
+    if (pendingSnapshot === undefined) return snapshot?.pending
+    const wait = sideSessionId === null ? undefined : pendingSnapshot.get(sideSessionId as SessionId)
+    return wait === undefined ? [] : [adaptPendingInteraction(wait)]
+  }, [pendingSnapshot, sideSessionId, snapshot?.pending])
 
   // The conversation content (order/nodes) is NOT on `session.getSnapshot()` —
   // since DSH 0.1.2 that snapshot is the control face only (queue, running,
@@ -215,10 +228,12 @@ export function SideChatPanel({
   const chatTarget = useMemo<Observable<unknown> | undefined>(() => {
     if (sideSessionId === null) return undefined
     const svc = uiConversation as
-      | { binding(id: string): { target(name: string): Observable<unknown> } | undefined }
+      | { binding(id: string): { activate?(name: string): void; target(name: string): Observable<unknown> } | undefined }
       | undefined
     try {
-      return svc?.binding(sideSessionId)?.target('chat')
+      const chatBinding = svc?.binding(sideSessionId)
+      chatBinding?.activate?.('chat')
+      return chatBinding?.target('chat')
     } catch {
       // The binding resolves the session lazily; a not-yet-listed side chat
       // throws, and the empty hero below is the correct stand-in until it lands.
@@ -327,8 +342,8 @@ export function SideChatPanel({
               projections: session.projections,
             }}
             running={running}
-            pending={snapshot?.pending}
-            runningCalls={snapshot?.runningCalls}
+            pending={pending}
+            runningCalls={chatSnapshot?.legacy?.runningCalls}
             modelDirectories={modelDirectories as import('./model-directory').ModelDirectoryResolverFace | undefined}
             conversation={conversation}
             onError={handleError}

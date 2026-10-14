@@ -35,7 +35,7 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
 import type { Context } from '@just-genius/dsh-plugin-runtime/host'
 import { SessionId, type Session, type SessionEvent } from '@just-genius/dsh-plugin-runtime/host'
 import type { CommandInvocation, CommandResult } from '@just-genius/dsh-plugin-runtime/host'
-import { resolveSessionPreset } from '@just-genius/dsh-plugin-runtime/host'
+import { resolveSessionPreset, sessionEvents } from '@just-genius/dsh-plugin-runtime/host'
 import {
   SIDE_CHAT_CLOSE_PATH,
   SIDE_CHAT_DEBUG_PATH,
@@ -135,7 +135,7 @@ export function sideChatTitleOf(session: Session): string | undefined {
   // undefined until the host materializes it. Reading `.find` there threw
   // "Cannot read properties of undefined", which failed the whole LIST route,
   // so the panel could not enumerate its side chats at all.
-  const events = session.events
+  const events = sessionEvents(session)
   if (!Array.isArray(events)) return undefined
   const first = events.find(
     (event): event is SessionEvent<'user/message'> =>
@@ -398,10 +398,7 @@ export function createDshCodexSideChatServer(
       // Same defensive read as `sessionEventsOf`: a parent whose log has not
       // materialized would otherwise throw inside preset resolution and fail
       // the fork with an unrelated-looking error.
-      resolveSessionPreset({
-        header: parent.header,
-        events: Array.isArray(parent.events) ? parent.events : [],
-      }),
+      resolveSessionPreset(parent),
     )
     const childId = `session-${randomUUID()}` as SessionId
     // A side chat is TEMPORARY, so it is deliberately NOT linked as a fork:
