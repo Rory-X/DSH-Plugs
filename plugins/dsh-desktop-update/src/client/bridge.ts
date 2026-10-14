@@ -44,22 +44,8 @@ export interface DesktopSeatInfo {
   description: string
 }
 
-export interface DesktopNotifySpec {
-  contributor: string
-  id: string
-  title: string
-  body: string
-  silent?: boolean
-}
-
-export interface DesktopNotifyAction {
-  contributor: string
-  id: string
-}
-
-export interface DesktopNotifyResult {
-  shown: boolean
-}
+import type { DesktopNotificationBridge } from '@just-genius/dsh-plugin-runtime/client'
+export type { DesktopNotifySpec, DesktopNotifyAction, DesktopNotifyResult } from '@just-genius/dsh-plugin-runtime/client'
 
 export interface DshDesktop {
   updates: {
@@ -78,11 +64,7 @@ export interface DshDesktop {
     revoke(seat: DesktopSeatName, contributor: string): Promise<void>
     onAction(listener: (action: DesktopSeatAction) => void): () => void
   }
-  notify: {
-    show(spec: DesktopNotifySpec): Promise<DesktopNotifyResult>
-    close(contributor: string, id?: string): Promise<void>
-    onAction(listener: (action: DesktopNotifyAction) => void): () => void
-  }
+  notify: DesktopNotificationBridge
 }
 
 export function bridge(): DshDesktop | undefined {

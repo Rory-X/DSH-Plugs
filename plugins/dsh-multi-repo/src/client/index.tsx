@@ -16,7 +16,7 @@ declare module '@just-genius/dsh-plugin-runtime/client' {
 
 const NS = 'multi-repo'
 
-export const inject = [CLIENT_SERVICES.slots, CLIENT_SERVICES.locale, CLIENT_SERVICES.workspaces, CLIENT_SERVICES.sessions] as const
+export const inject = [CLIENT_SERVICES.slots, CLIENT_SERVICES.locale, CLIENT_SERVICES.workspaces, CLIENT_SERVICES.uiWorkspace, CLIENT_SERVICES.sessions] as const
 
 /** Decision made by the entry picker; consumed by the next create() call. */
 let pendingDecision: ConfirmDecision | null = null
@@ -27,7 +27,7 @@ export function apply(ctx: ClientContext): void {
 
   // Capture BEFORE patching: the confirm dialog's "add folder" button must
   // open the real OS picker, not re-enter our own pickDirectory wrapper.
-  const originalPickDirectory = ctx.workspaces.pickDirectory.bind(ctx.workspaces)
+  const originalPickDirectory = ctx.uiWorkspace.pickDirectory.bind(ctx.uiWorkspace)
   const workspaceFace: WorkspaceFace = {
     create: (input) => ctx.workspaces.create(input),
     rename: (workspaceId, title) => ctx.workspaces.rename(workspaceId, title),
@@ -66,7 +66,7 @@ export function apply(ctx: ClientContext): void {
  * stash the full decision for create() to bind.
  */
 function patchPickDirectory(ctx: ClientContext): () => void {
-  const workspaces = ctx.workspaces
+  const workspaces = ctx.uiWorkspace
   const hadOwn = Object.prototype.hasOwnProperty.call(workspaces, 'pickDirectory')
   const original = workspaces.pickDirectory.bind(workspaces)
 

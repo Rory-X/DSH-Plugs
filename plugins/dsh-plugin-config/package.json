@@ -1,6 +1,6 @@
 {
   "name": "@just-genius/dsh-plugin-config",
-  "description": "Settings \u2192 Plugins: installed inventory, npm updates, and the awesome-dsh-plugin marketplace in one tab",
+  "description": "Settings → Plugins: installed inventory, npm updates, and the awesome-dsh-plugin marketplace in one tab",
   "version": "0.1.0",
   "publishConfig": {
     "access": "public"
@@ -22,7 +22,13 @@
   "dsh": {
     "client": {
       "inject": [
-        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-api-session-controller",
+        "@deepseek-ai/dsh-api-workspace-controller",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-chat",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-session",
+        "@deepseek-ai/dsh-client-ui-workspace",
         "@deepseek-ai/dsh-client-locale",
         "@deepseek-ai/dsh-api-remotes",
         "@deepseek-ai/dsh-client-ui-settings"
