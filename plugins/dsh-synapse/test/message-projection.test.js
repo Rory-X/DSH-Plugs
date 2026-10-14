@@ -39,6 +39,15 @@ test('does not turn injected <system-reminder> blocks into a question card', asy
   )
 })
 
+test('uses declared provenance instead of treating every user-role event as a human question', async () => {
+  const messagesFromEvents = await loadMessagesFromEvents()
+  const events = ['plugin', 'goal', 'user'].map((kind, seq) => ({
+    type: 'user/message', seq, time: seq,
+    data: { source: { kind }, content: [{ type: 'text', text: '<system-reminder>User quotation</system-reminder>' }] },
+  }))
+  assert.deepEqual(messagesFromEvents(events).map(message => message.sourceSeq), [2])
+})
+
 test('server projection skips injected system blocks too', async () => {
   const source = await readFile(new URL('../index.js', import.meta.url), 'utf8')
   // The Host-side projection shares the same rule; keep both in step.

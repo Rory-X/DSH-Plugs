@@ -1,9 +1,10 @@
 import { mkdir, readFile, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import { randomUUID } from 'node:crypto'
 import { dirname } from 'node:path'
+import { HOST_SERVICES, readPersistedSession, sessionEvents } from '@just-genius/dsh-plugin-runtime/host'
 
 export const name = 'synapse'
-export const inject = ['webServer', 'sessions']
+export const inject = [HOST_SERVICES.webServer, HOST_SERVICES.sessions, HOST_SERVICES.sessionPersistence]
 
 const MAX_BODY_BYTES = 32 * 1024
 const MAX_TITLE_LENGTH = 120
@@ -195,14 +196,24 @@ export class WorkspaceStore {
   }
 
   /** Replay one live DSH session into the dedicated projection workspace. */
-  async projectSession(session, replayFrom = 0, workspaceTitle = 'DSH 任务') {
+  async projectSession(session, replayFrom = undefined, workspaceTitle = 'DSH 任务') {
     return this.mutate(() => {
       if (this.state.hiddenSessionIds.includes(session.id)) return null
       const workspace = this.dshWorkspace(sessionCwd(session), workspaceTitle)
       const thread = this.dshThread(workspace, session)
-      for (const event of session.events) {
-        if (event.seq >= replayFrom) this.projectEventInto(workspace, thread, event)
+      const events = sessionEvents(session)
+      const boundary = replayFrom ?? forkBoundary(session, events) ?? 0
+      // Rebuild the derived cache from the canonical log so old projection
+      // mistakes disappear on replay. Keep node layout and message identities.
+      const messageIds = new Map(thread.messages.map(message => [message.sourceSeq, message.id]))
+      thread.messages = []
+      thread.pendingProcess = []
+      thread.currentTurn = undefined
+      for (const event of events) {
+        if (event.seq >= boundary) this.projectEventInto(workspace, thread, event)
       }
+      for (const message of thread.messages) message.id = messageIds.get(message.sourceSeq) ?? message.id
+      workspace.projectionRevision = (workspace.projectionRevision ?? 0) + 1
       return structuredClone(thread)
     }, { deferred: true })
   }
@@ -373,6 +384,8 @@ export class WorkspaceStore {
   }
 
   dshThread(workspace, session) {
+    const parentSessionId = typeof session.header?.parentSession === 'string' ? session.header.parentSession : null
+    const parent = this.state.workspaces.flatMap(item => item.threads).find(item => item.dshSessionId === parentSessionId)
     let thread = workspace.threads.find(item => item.dshSessionId === session.id)
     if (thread !== undefined) {
       if (typeof session.title === 'string' && session.title.trim() !== '') {
@@ -382,12 +395,12 @@ export class WorkspaceStore {
       }
       // `seedLength` is DSH's durable fork cut. Keep it even after the
       // session has been restored, when its in-process `firstLiveSeq` moves.
-      const seedLength = session.header?.seedLength
-      if (Number.isSafeInteger(seedLength) && seedLength >= 0) thread.sourceSeedLength = seedLength
+      const seedLength = forkBoundary(session)
+      if (seedLength !== null) thread.sourceSeedLength = seedLength
+      thread.sourceParentSessionId = parentSessionId
+      thread.parentId = parent?.id ?? null
       return thread
     }
-    const parentSessionId = typeof session.header?.parentSession === 'string' ? session.header.parentSession : null
-    const parent = parentSessionId === null ? undefined : workspace.threads.find(item => item.dshSessionId === parentSessionId)
     const siblings = workspace.threads.filter(item => item.sourceParentSessionId === parentSessionId)
     const now = new Date().toISOString()
     thread = {
@@ -395,7 +408,7 @@ export class WorkspaceStore {
       title: typeof session.title === 'string' && session.title.trim() !== '' ? session.title.slice(0, MAX_TITLE_LENGTH) : (parent === undefined ? 'DSH 会话' : `${parent.title} 分支`),
       parentId: parent?.id ?? null,
       sourceParentSessionId: parentSessionId,
-      sourceSeedLength: Number.isSafeInteger(session.header?.seedLength) && session.header.seedLength >= 0 ? session.header.seedLength : null,
+      sourceSeedLength: forkBoundary(session),
       dshSessionId: session.id,
       dshSessionTitle: typeof session.title === 'string' ? session.title.slice(0, MAX_TITLE_LENGTH) : null,
       color: TOPIC_COLORS[workspace.threads.length % TOPIC_COLORS.length],
@@ -411,14 +424,18 @@ export class WorkspaceStore {
     workspace.threads.push(thread)
     // A child may arrive before its parent during startup replay. Repair that
     // relation when the missing parent later reaches the projection.
-    for (const child of workspace.threads) {
-      if (child.sourceParentSessionId === session.id && child.parentId === null) child.parentId = thread.id
+    for (const child of this.state.workspaces.flatMap(item => item.threads)) {
+      if (child.sourceParentSessionId === session.id) child.parentId = thread.id
     }
     workspace.updatedAt = now
     return thread
   }
 
   projectEventInto(workspace, thread, event) {
+    if (event.type === 'turn/start') {
+      thread.currentTurn = event.data?.turn
+      return
+    }
     if (event.type === 'session/title' && typeof event.data?.title === 'string') {
       thread.title = event.data.title.slice(0, MAX_TITLE_LENGTH)
       thread.dshSessionTitle = thread.title
@@ -439,9 +456,11 @@ export class WorkspaceStore {
       text: projection.text,
       kind: projection.kind,
       sourceSeq: event.seq,
+      turn: event.data?.turn ?? thread.currentTurn,
+      ...(projection.kind === 'user' ? { source: event.data?.source } : {}),
       at,
       ...(projection.kind === 'assistant' || projection.kind === 'error'
-        ? { turn: event.data?.turn, step: event.data?.step, process: [] }
+        ? { step: event.data?.step, process: [] }
         : {}),
     }
     this.attachPendingProcess(thread, message)
@@ -515,7 +534,7 @@ export class WorkspaceStore {
   }
 
   summary(workspace) {
-    return { id: workspace.id, kind: workspace.kind ?? 'manual', cwd: workspace.cwd ?? null, title: workspace.title, createdAt: workspace.createdAt, updatedAt: workspace.updatedAt, threadCount: workspace.threads.length }
+    return { id: workspace.id, kind: workspace.kind ?? 'manual', cwd: workspace.cwd ?? null, title: workspace.title, createdAt: workspace.createdAt, updatedAt: workspace.updatedAt, threadCount: workspace.threads.length, projectionRevision: workspace.projectionRevision ?? 0 }
   }
 }
 
@@ -645,8 +664,10 @@ function requiredText(value, maxLength, field) {
 function projectableEvent(event) {
   switch (event.type) {
     case 'user/message': {
-      const text = contentText(event.data.content)
-      return isRuntimeContextText(text) ? null : noteProjection('user', text)
+      const text = contentText(event.data?.content)
+      const source = event.data?.source?.kind
+      if (source !== undefined && source !== 'user') return null
+      return source === undefined && isRuntimeContextText(text) ? null : noteProjection('user', text)
     }
     case 'assistant/message':
       return noteProjection('assistant', contentText(event.data?.message?.content))
@@ -659,9 +680,7 @@ function projectableEvent(event) {
       return null
     }
     default:
-      return /(?:error|failed|failure|cancel(?:led)?|abort)/i.test(event.type)
-        ? noteProjection('error', errorText(event.data?.error ?? event.data?.reason ?? event.data) ?? 'Harness 运行失败')
-        : null
+      return null
   }
 }
 
@@ -693,7 +712,18 @@ function isRuntimeContextText(text) {
 }
 
 function isRuntimeContextMessage(message) {
-  return message?.kind === 'user' && isRuntimeContextText(message.text)
+  return message?.kind === 'user' && (message.source?.kind === undefined
+    ? isRuntimeContextText(message.text) : message.source.kind !== 'user')
+}
+
+// firstLiveSeq is the process restore boundary, not the fork boundary. Modern
+// hosts expose the durable count; older logs carry seedLength or a tagged marker.
+export function forkBoundary(session, events = sessionEvents(session)) {
+  if (typeof session.header?.parentSession !== 'string') return 0
+  for (const value of [session.inheritedEventCount, session.header?.seedLength]) {
+    if (Number.isSafeInteger(value) && value >= 0) return value
+  }
+  return events.findLast(event => event.type === 'session/end-seed' && event.data?.inherited === true)?.seq ?? null
 }
 
 function contentText(content) {
@@ -747,6 +777,44 @@ function page() {
   return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Synapse for DSH</title><link rel="stylesheet" href="/synapse/styles.css"></head><body><div id="app"></div><script src="/synapse/app.js"></script></body></html>`
 }
 
+/** Load unopened relatives without activating sessions or acquiring a writer. */
+export function createSessionHydrator(ctx, store, workspaceTitle, reportFailure) {
+  const loaded = new Map()
+  const pending = new Map()
+  const load = id => {
+    if (loaded.has(id)) return Promise.resolve(loaded.get(id))
+    if (pending.has(id)) return pending.get(id)
+    const task = (async () => {
+      let session = ctx.sessions.list().find(session => session.id === id)
+      if (session === undefined) {
+        if (ctx.sessionPersistence === undefined) return undefined
+        const persisted = await readPersistedSession(ctx.sessionPersistence, id)
+        // A user may have opened the session while its disk read was pending.
+        session = ctx.sessions.list().find(session => session.id === id) ?? { id, ...persisted }
+      }
+      await store.projectSession(session, undefined, workspaceTitle)
+      const parent = session.header?.parentSession
+      loaded.set(id, parent)
+      return parent
+    })().catch(error => { reportFailure(error); return undefined }).finally(() => pending.delete(id))
+    pending.set(id, task)
+    return task
+  }
+  return async sessions => {
+    const ids = sessions.flatMap(session => [
+      session?.blank !== true ? session?.id : undefined,
+      session?.parentId,
+    ]).filter(id => typeof id === 'string' && id !== '')
+    const visited = new Set()
+    for (const id of ids) {
+      if (visited.has(id)) continue
+      visited.add(id)
+      const parent = await load(id)
+      if (typeof parent === 'string') ids.push(parent)
+    }
+  }
+}
+
 /** Mount Synapse routes on the existing DSH Web Server. */
 export function apply(ctx, config) {
   const store = new WorkspaceStore(config?.dataFile)
@@ -757,11 +825,11 @@ export function apply(ctx, config) {
   const reportProjectionFailure = error => {
     ctx.logger.warn(error instanceof Error ? error : new Error(String(error)))
   }
+  const hydrateSessions = createSessionHydrator(ctx, store, projectionWorkspaceTitle, reportProjectionFailure)
   const replaySession = session => {
     // Forks inherit their parent's log. The canvas already represents that
     // history through the parent node, so only project the child's live tail.
-    const replayFrom = session.header?.parentSession === undefined ? 0 : session.firstLiveSeq
-    void store.projectSession(session, replayFrom, projectionWorkspaceTitle).catch(reportProjectionFailure)
+    void store.projectSession(session, undefined, projectionWorkspaceTitle).catch(reportProjectionFailure)
   }
   // Buffer live events per session and flush them in one write per microtask,
   // so a burst of turn events coalesces into a single save instead of N.
@@ -812,7 +880,12 @@ export function apply(ctx, config) {
       }
       const branch = /^\/synapse\/api\/threads\/([0-9a-f-]+)\/branch$/i.exec(path)
       if (branch !== null && req.method === 'POST') return sendJson(res, 201, { thread: await store.branch(branch[1], await readJson(req)) })
-      if (path === '/synapse/api/sessions/sync' && req.method === 'POST') { const body = await readJson(req); return sendJson(res, 200, { workspaces: await store.syncSessions(body.sessions, body.removedSessionIds) }) }
+      if (path === '/synapse/api/sessions/sync' && req.method === 'POST') {
+        const body = await readJson(req)
+        await store.syncSessions(body.sessions, body.removedSessionIds)
+        if (autoProjection) await hydrateSessions(body.sessions)
+        return sendJson(res, 200, { workspaces: await store.list() })
+      }
       const messages = /^\/synapse\/api\/threads\/([0-9a-f-]+)\/messages$/i.exec(path)
       if (messages !== null && req.method === 'POST') return sendJson(res, 201, { thread: await store.addMessage(messages[1], (await readJson(req)).text) })
       const thread = /^\/synapse\/api\/threads\/([0-9a-f-]+)$/i.exec(path)

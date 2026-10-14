@@ -3,7 +3,60 @@ import { mkdtemp, readFile, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { WorkspaceStore } from '../index.js'
+import { WorkspaceStore, forkBoundary } from '../index.js'
+
+test('uses durable fork boundaries across modern hosts, legacy headers and restored logs', () => {
+  assert.equal(forkBoundary({ header: { parentSession: 'parent' }, inheritedEventCount: 4, firstLiveSeq: 20 }), 4)
+  assert.equal(forkBoundary({ header: { parentSession: 'parent', seedLength: 4 }, firstLiveSeq: 20 }), 4)
+  assert.equal(forkBoundary({ header: { parentSession: 'parent' }, firstLiveSeq: 20, events: [
+    { type: 'session/end-seed', seq: 2, data: { inherited: true } },
+    { type: 'session/end-seed', seq: 4, data: { inherited: true } },
+    { type: 'session/end-seed', seq: 15, data: {} },
+  ] }), 4)
+  assert.equal(forkBoundary({ header: {}, firstLiveSeq: 20 }), 0)
+})
+
+test('replays a restored fork tail and rebuilds stale projections without changing its layout', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'dsh-synapse-replay-'))
+  const store = new WorkspaceStore(join(directory, 'state.json'))
+  const session = {
+    id: 'child', header: { cwd: 'C:/child', parentSession: 'parent' }, inheritedEventCount: 4, firstLiveSeq: 30,
+    snapshotEvents: () => [
+      { type: 'user/message', seq: 1, time: 1, data: { content: [{ type: 'text', text: 'Inherited question' }] } },
+      { type: 'user/message', seq: 5, time: 5, data: { source: { kind: 'plugin' }, content: [{ type: 'text', text: 'Injected notice' }] } },
+      { type: 'user/message', seq: 6, time: 6, data: { source: { kind: 'user' }, content: [{ type: 'text', text: 'Child question' }] } },
+      { type: 'assistant/message', seq: 7, time: 7, data: { message: { content: [{ type: 'text', text: 'Child answer' }] } } },
+    ],
+  }
+  const child = await store.projectSession(session)
+  await store.updateThread(child.id, { position: { x: 321, y: 456 } })
+  await store.addMessage(child.id, 'Stale locally cached message')
+  const parent = await store.projectSession({ id: 'parent', header: { cwd: 'C:/parent' }, events: [] })
+  const restored = await store.projectSession(session)
+  assert.equal(restored.id, child.id)
+  assert.equal(restored.parentId, parent.id)
+  assert.equal(restored.sourceSeedLength, 4)
+  assert.deepEqual(restored.position, { x: 321, y: 456 })
+  assert.deepEqual(restored.messages.map(message => message.text), ['Child question', 'Child answer'])
+  assert.deepEqual(restored.messages.map(message => message.id), child.messages.map(message => message.id))
+  await store.flush()
+})
+
+test('projects only human questions and explicit turn failures with their turn identity', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'dsh-synapse-message-source-'))
+  const store = new WorkspaceStore(join(directory, 'state.json'))
+  const thread = await store.projectSession({ id: 'session', header: {}, events: [
+    { type: 'turn/start', seq: 0, time: 0, data: { turn: 2 } },
+    { type: 'user/message', seq: 1, time: 1, data: { source: { kind: 'user' }, content: [{ type: 'text', text: '<system-reminder>Quoted by the user</system-reminder>' }] } },
+    { type: 'user/message', seq: 2, time: 2, data: { source: { kind: 'plugin' }, content: [{ type: 'text', text: 'File change notice' }] } },
+    { type: 'request/failed', seq: 3, time: 3, data: { error: { message: 'Retryable transport error' } } },
+    { type: 'turn/end', seq: 4, time: 4, data: { turn: 2, reason: { kind: 'error', error: { message: 'Actual turn failure' } } } },
+  ] })
+  assert.deepEqual(thread.messages.map(message => [message.kind, message.turn]), [['user', 2], ['error', 2]])
+  assert.equal(thread.messages[0].text, '<system-reminder>Quoted by the user</system-reminder>')
+  assert.equal(thread.messages[1].text, 'Actual turn failure')
+  await store.flush()
+})
 
 test('persists a workspace, a DSH-linked thread, and a message', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'dsh-synapse-'))

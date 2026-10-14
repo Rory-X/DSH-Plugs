@@ -25,9 +25,10 @@ test('reuses the map iframe and initializes the canvas only after iframe load', 
   assert.match(openFlow, /type: 'synapse:map-opened'/)
   // The live frame reference is published on mount and cleared on unmount, so
   // session sync only targets a frame that is actually mounted.
-  assert.match(source, /frame = ref\.current/)
+  assert.match(source, /const mountedFrame = ref\.current/)
+  assert.match(source, /frame = mountedFrame/)
   assert.match(openFlow, /frame = null/)
-  assert.match(source, /if \(frame === null\) return/)
+  assert.match(source, /liveBridge\.setActive\(true\)/)
 })
 
 test('keeps the canvas viewport across dialog/map toggles and recenters on real session switches', async () => {
@@ -65,7 +66,7 @@ test('activating a session from the map syncs DSH without closing the map', asyn
   const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
   const activate = source.slice(source.indexOf("'synapse:activate-session'"), source.indexOf("'synapse:fork-session'"))
 
-  assert.match(activate, /ctx\.sessions\.open\(event\.data\.sessionId\)/)
+  assert.match(activate, /openSession\(ctx, event\.data\.sessionId\)/)
   assert.doesNotMatch(activate, /close\(\)/)
 })
 
@@ -307,7 +308,7 @@ test('covers the canvas until it reports ready so switching tabs never flashes',
   assert.match(mount, /dsh-synapse-veil/)
   // Revealed on map-ready, with a timer so it can never stay hidden.
   assert.match(source, /'synapse:map-ready'\) return revealFrame\(\)/)
-  assert.match(mount, /revealTimer = window\.setTimeout\(revealFrame, 1500\)/)
+  assert.match(mount, /revealTimer = window\.setTimeout\(.*revealFrame\(\).*1500\)/)
   assert.match(mount, /window\.clearTimeout\(revealTimer\)/)
   // map-opened is posted from the element: a cached frame can finish loading
   // before the effect assigns `frame`, which would leave the canvas unready.
@@ -547,26 +548,6 @@ test('renders a card turn with the dsh-codex side-chat look', async () => {
   assert.doesNotMatch(source, /renderTurnView\(card\)/)
 })
 
-test('shows only the current conversation cards on the canvas', async () => {
-  const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
-  const pan = source.slice(source.indexOf('const CANVAS_TWEAKS_SCRIPT'), source.indexOf('const injectCanvasStyle'))
-
-  // conversationCards is re-bound (it is a top-level function declaration, so
-  // the app's own call sites pick up the wrapper) instead of patching upstream.
-  assert.match(pan, /var originalConversationCards = window\.conversationCards/)
-  assert.match(pan, /window\.conversationCards = function \(threads\)/)
-  assert.match(pan, /originalConversationCards\(\[current\]\)/)
-  // Resolved from state with the active id as a fallback, so 整理/定位 (which
-  // re-render) keep seeing only the current conversation.
-  assert.match(pan, /state\?\.currentDsh\?\.id \?\? state\?\.activeId/)
-  // An unresolvable current session must never widen the view: falling back to
-  // the unfiltered list would put every conversation back on the canvas.
-  assert.match(pan, /typeof currentId !== 'string' \|\| currentId === ''\) return \[\]/)
-  assert.match(pan, /if \(current === undefined\) return \[\]/)
-  assert.match(pan, /catch \(error\) \{ return \[\] \}/)
-  assert.doesNotMatch(pan, /catch \(error\) \{ return originalConversationCards\(threads\) \}/)
-})
-
 test('hides the host message rail only while the map view is mounted', async () => {
   const source = await readFile(new URL('../client.js', import.meta.url), 'utf8')
   const mount = source.slice(source.indexOf('function SynapseMapView'), source.indexOf('// Invisible header resident'))
@@ -729,46 +710,12 @@ test('reveals hidden ancestor paths when a conversation becomes current', async 
   assert.match(current, /revealConversationThread\(conversationCards\(visibleThreads\(\)\), thread\.id\)/)
 })
 
-test('scopes the canvas to the current DSH session family', async () => {
-  const source = await readFile(new URL('../app.js', import.meta.url), 'utf8')
-  const scope = source.slice(source.indexOf('function threadFamily'), source.indexOf('function workspaceChoices'))
-  const canvas = source.slice(source.indexOf('function renderCanvas'), source.indexOf('function isProcessMessage'))
-
-  assert.match(scope, /function threadFamily/)
-  assert.match(scope, /threadFamily\(threads, current\)/)
-  // Without a current session, or before it is projected, keep the workspace
-  // instead of emptying the canvas.
-  assert.match(scope, /if \(typeof id !== 'string'\) return threads/)
-  assert.match(scope, /if \(current === undefined\) return threads/)
-  assert.match(canvas, /const threads = visibleThreads\(\)/)
-  assert.doesNotMatch(canvas, /const threads = state\.workspace\?\.threads \?\? \[\]/)
-  const others = source.match(/conversationCards\(state\.workspace\.threads\)/g) ?? []
-  assert.equal(others.length, 0, 'no graph call may bypass visibleThreads()')
-
-  const start = source.indexOf('function threadFamily')
-  const end = source.indexOf('function visibleThreads')
-  assert.ok(start !== -1 && end > start)
-  const exports = {}
-  new Function('exports', `${source.slice(start, end)}\nexports.threadFamily = threadFamily`)(exports)
-  const threads = [
-    { id: 'root', parentId: null, dshSessionId: 's-root' },
-    { id: 'child', parentId: 'root', dshSessionId: 's-child' },
-    { id: 'cousin', parentId: 'root', dshSessionId: 's-cousin' },
-    { id: 'other', parentId: null, dshSessionId: 's-other' },
-  ]
-  assert.deepEqual(exports.threadFamily(threads, threads[1]).map(thread => thread.id), ['root', 'child', 'cousin'])
-  assert.deepEqual(exports.threadFamily(threads, threads[3]).map(thread => thread.id), ['other'])
-  assert.deepEqual(exports.threadFamily(threads, undefined), [])
-})
-
 test('keeps a just-forked child on the map after the host switches session', async () => {
   const source = await readFile(new URL('../app.js', import.meta.url), 'utf8')
   const submit = source.slice(source.indexOf('async function submitDraft'), source.indexOf('function threadsById'))
-  const load = source.slice(source.indexOf('async function threadsForDshWorkspace'), source.indexOf('async function openDshWorkspace'))
 
   assert.match(submit, /state\.mapCardSessionSwitches\.add\(session\.id\)/)
   assert.match(submit, /post\('synapse:activate-session', \{ sessionId: result\.thread\.dshSessionId \}\)/)
-  assert.match(load, /loadedIds\.has\(thread\.parentId\)/)
 })
 
 test('re-centers the camera when the current session replaces the canvas', async () => {

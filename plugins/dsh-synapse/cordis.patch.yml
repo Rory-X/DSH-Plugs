@@ -1,5 +1,5 @@
-# dsh-synapse only extends the Web profile: it reuses the existing DSH server
-# rather than running a second application process.
+# dsh-synapse extends the web client used by both web and desktop profiles.
+# It reuses the existing DSH server rather than running another application.
 - insert:
     - id: synapse
       name: dsh-synapse

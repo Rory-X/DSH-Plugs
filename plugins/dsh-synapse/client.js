@@ -1,14 +1,42 @@
-window.__ModuleLoader__.load({
-  id: 'dsh-synapse',
-  factory: (require) => {
-    const React = require('react')
+import * as React from 'react'
+import * as primitives from '@just-genius/dsh-plugin-ui/official-primitives'
+import { CLIENT_SERVICES } from '@just-genius/dsh-plugin-runtime/client'
+import { createTurnReader, createLiveReplyBridge, createContextPublisher, markdownProps } from './client-state.js'
+
+function bridgeTargetOrigin(location) {
+  // Electron's custom scheme can have an opaque postMessage origin.
+  return location.protocol === 'dsh-app:' ? '*' : location.origin
+}
+
+function isBridgeEvent(event, peer, location) {
+  if (peer == null || event.source !== peer || event.data?.source !== 'dsh-synapse') return false
+  return event.origin === location.origin || location.protocol === 'dsh-app:'
+    && (event.origin === 'null' || event.origin === `${location.protocol}//${location.host}`)
+}
+
+function chatTargetOf(ctx, sessionId) {
+  try {
+    const sessionBinding = ctx.sessions.binding(sessionId)
+    if (sessionBinding === undefined) return undefined
+    return ctx.uiConversation.binding(sessionBinding).target('chat')
+  } catch (error) { reportSynapseError('chat binding', error, sessionId); return undefined }
+}
+
+function openSession(ctx, sessionId) {
+  if (ctx.uiWorkspace?.openSession) return ctx.uiWorkspace.openSession(sessionId)
+  return ctx.sessions.open(sessionId)
+}
+
+function reportSynapseError(phase, error, sessionId) {
+  console.error('[dsh-synapse] ' + phase, { sessionId }, error)
+}
+
     const h = React.createElement
-    let primitives = null
-    try { primitives = require('@deepseek-ai/dsh-client-ui-primitives') } catch { primitives = null }
-    const module = { exports: {} }
     const currentSession = ctx => {
       const snapshot = ctx.sessions.list.getSnapshot()
-      const id = snapshot.current
+      const binding = ctx.uiSession?.current?.getSnapshot()
+      const selection = ctx.uiWorkspace?.selection?.getSnapshot()
+      const id = selection?.sessionId ?? (binding === undefined ? snapshot.current : binding.key)
       if (id === undefined) return null
       const session = snapshot.byId[id]
       return session === undefined ? null : { id, title: session.displayTitle, cwd: session.cwd ?? null, parentId: session.parentId ?? null }
@@ -100,7 +128,7 @@ window.__ModuleLoader__.load({
         if (node != null && node.kind === 'user' && node.visibility !== 'hidden') userKeys.push(key)
       }
       let start = -1
-      if (Number.isInteger(seq)) start = userKeys.findIndex(key => seqOf(nodeOf(key)) === seq)
+      if (Number.isInteger(seq)) start = userKeys.findLastIndex(key => seqOf(nodeOf(key)) <= seq)
       if (start === -1 && Number.isInteger(turnIndex) && turnIndex >= 0 && turnIndex < userKeys.length) start = turnIndex
       if (start === -1) return []
       const from = order.indexOf(userKeys[start])
@@ -122,13 +150,27 @@ window.__ModuleLoader__.load({
         return node != null && node.kind === 'user' && node.visibility !== 'hidden'
       })
       let start = -1
-      if (Number.isInteger(seq)) start = userKeys.findIndex(key => seqOf(nodeOf(key)) === seq)
+      if (Number.isInteger(seq)) start = userKeys.findLastIndex(key => seqOf(nodeOf(key)) <= seq)
       if (start === -1 && Number.isInteger(turnIndex)) start = turnIndex
       return start === -1 || start === userKeys.length - 1
     }
     function MarkdownBody({ text, streaming }) {
-      if (primitives?.MarkdownText) return h(primitives.MarkdownText, { text, streaming: streaming === true, codeLabels: { copyLabel: '复制', copiedLabel: '已复制' } })
+      if (primitives.OfficialMarkdownText) return h(MarkdownBoundary, { text },
+        h(primitives.OfficialMarkdownText, markdownProps(text, streaming)))
       return h('div', { className: 'dsh-codex-sidechat-md-fallback' }, text)
+    }
+    class MarkdownBoundary extends React.Component {
+      state = { failed: false }
+      static getDerivedStateFromError() { return { failed: true } }
+      componentDidCatch(error) { reportSynapseError('turn markdown', error) }
+      render() {
+        if (!this.state.failed) return this.props.children
+        return h('div', { className: 'dsh-codex-sidechat-md-fallback' },
+          h('p', { className: 'dsh-synapse-detail-error', role: 'status' }, '内容暂时无法格式化，已显示原文。 ',
+            h('button', { type: 'button', onClick: () => this.setState({ failed: false }) }, '重试')),
+          this.props.text,
+        )
+      }
     }
     // Compact outline glyphs matching dsh-codex's tool/think leading icons.
     // Used when ui-primitives is unavailable so the row never renders blank.
@@ -187,7 +229,7 @@ window.__ModuleLoader__.load({
           if (text.length === 0) return null
           return h('div', { className: 'dsh-codex-sidechat-user' },
             h('div', { className: 'dsh-codex-sidechat-user-bubble' },
-              primitives?.MessageText ? h(primitives.MessageText, { text }) : text,
+              text,
             ),
           )
         }
@@ -237,34 +279,11 @@ window.__ModuleLoader__.load({
       }
     }
     function SynapseTurnPane({ watch, ctx, onClose, onOpenInDialog }) {
-      const [, setTick] = React.useState(0)
-      React.useEffect(() => {
-        try { ctx.sessions.open(watch.sessionId) } catch { /* session gone */ }
-        let unsubscribe = () => {}
-        let timer = 0
-        let tries = 0
-        const bind = () => {
-          const scope = ctx.sessions.scope(watch.sessionId)
-          const session = scope === undefined ? undefined : ctx.sessions.sessionOf(scope)
-          if (session === undefined) {
-            if (tries < 25) {
-              tries += 1
-              timer = window.setTimeout(bind, 200)
-            }
-            setTick(value => value + 1)
-            return
-          }
-          unsubscribe = session.subscribe(() => setTick(value => value + 1))
-          setTick(value => value + 1)
-        }
-        bind()
-        return () => { window.clearTimeout(timer); unsubscribe() }
-      }, [watch.sessionId])
-      const scope = ctx.sessions.scope(watch.sessionId)
-      const session = scope === undefined ? undefined : ctx.sessions.sessionOf(scope)
-      const snapshot = session?.getSnapshot()
-      const nodes = sliceTurnNodes(snapshot?.chat, watch.seq, watch.turnIndex)
-      const running = snapshot?.running === true && isLastUserTurn(snapshot?.chat, watch.seq, watch.turnIndex)
+      const reader = React.useMemo(() => createTurnReader(ctx, watch.sessionId, window,
+        error => reportSynapseError('turn subscription', error, watch.sessionId)), [ctx, watch.sessionId])
+      const { snapshot, chat, error, loading } = React.useSyncExternalStore(reader.subscribe, reader.getSnapshot, reader.getSnapshot)
+      const nodes = sliceTurnNodes(chat, watch.seq, watch.turnIndex)
+      const running = snapshot?.running === true && isLastUserTurn(chat, watch.seq, watch.turnIndex)
       return h('aside', { className: 'dsh-synapse-turn-pane', 'aria-label': '本轮对话' },
         h('header', { className: 'dsh-synapse-turn-pane-head' },
           h('div', { className: 'dsh-synapse-turn-pane-meta' },
@@ -275,7 +294,10 @@ window.__ModuleLoader__.load({
             h('button', { type: 'button', className: 'dsh-synapse-turn-pane-close', onClick: onClose, 'aria-label': '关闭本轮' }, '×'),
           ),
         ),
-        session === undefined
+        error !== ''
+          ? h('div', { className: 'dsh-codex-sidechat-empty-panel', role: 'status' }, h('p', null, error, ' ',
+              h('button', { type: 'button', onClick: reader.retry }, '重试')))
+          : loading && nodes.length === 0
           ? h('div', { className: 'dsh-codex-sidechat-empty-panel' }, h('p', null, '正在打开这一轮…'))
           : h('div', { className: 'dsh-codex-sidechat-transcript-wrap' },
               h('div', { className: 'dsh-codex-sidechat-transcript' },
@@ -292,6 +314,25 @@ window.__ModuleLoader__.load({
               ),
             ),
       )
+    }
+    // The host retires an entire slot registration when a child render throws.
+    // Keep that failure inside the pane so the map iframe remains mounted.
+    class TurnPaneBoundary extends React.Component {
+      state = { failed: false }
+      static getDerivedStateFromError() { return { failed: true } }
+      componentDidCatch(error) { reportSynapseError('turn pane', error, this.props.sessionId) }
+      render() {
+        if (!this.state.failed) return this.props.children
+        return h('aside', { className: 'dsh-synapse-turn-pane', 'aria-label': '本轮对话' },
+          h('header', { className: 'dsh-synapse-turn-pane-head' },
+            h('span', null, '本轮对话'),
+            h('button', { type: 'button', onClick: this.props.onClose }, '关闭')),
+          h('div', { className: 'dsh-codex-sidechat-empty-panel', role: 'status' },
+            h('p', null, '这一轮暂时无法显示。 ', h('button', {
+              type: 'button', onClick: () => this.setState({ failed: false }),
+            }, '重试'))),
+        )
+      }
     }
     const turnWatch = {
       value: null,
@@ -557,29 +598,6 @@ window.__ModuleLoader__.load({
     }
   }, true)
 
-  // Show only the current DSH conversation's cards. conversationCards is a
-  // top-level function declaration, so re-binding it here is picked up by the
-  // app's own call sites without patching upstream source.
-  var originalConversationCards = window.conversationCards
-  if (typeof originalConversationCards === 'function') {
-    window.conversationCards = function (threads) {
-      // Resolved here rather than through currentDshThread(): that helper
-      // returns undefined whenever the current-session id is missing, and a
-      // fallback to "all threads" here would leak every conversation back onto
-      // the canvas (seen when 整理/定位 re-rendered).
-      try {
-        var list = state?.workspace?.threads ?? threads
-        var currentId = state?.currentDsh?.id ?? state?.activeId
-        if (typeof currentId !== 'string' || currentId === '') return []
-        var current = list.find(function (thread) {
-          return thread?.dshSessionId === currentId || thread?.id === currentId
-        })
-        if (current === undefined) return []
-        return originalConversationCards([current])
-      } catch (error) { return [] }
-    }
-  }
-
   // User-facing copy: DSH's product name reads as 会话 in this UI. Rewritten
   // in the DOM (not in upstream source) so upstream updates stay clean. Only
   // text and label attributes are touched, and script/style contents are
@@ -719,7 +737,7 @@ window.__ModuleLoader__.load({
   // the map tab leaves the keyboard on the host page — so the gesture works no
   // matter where the focus is.
   window.addEventListener('message', function (event) {
-    if (event.origin !== location.origin || event.data?.source !== 'dsh-synapse') return
+    if (!isBridgeEvent(event, window.parent, location)) return
     if (event.data.type !== 'synapse:space-pan') return
     setSpace(event.data.down === true)
   })
@@ -740,15 +758,14 @@ window.__ModuleLoader__.load({
       doc.body.append(script)
     }
 
-    module.exports.inject = ['sessions', 'workspaces', 'slots']
-    module.exports.apply = ctx => {
+    export const inject = [CLIENT_SERVICES.sessions, CLIENT_SERVICES.workspaces, CLIENT_SERVICES.slots, CLIENT_SERVICES.uiConversation, CLIENT_SERVICES.uiSession, CLIENT_SERVICES.uiWorkspace]
+    export function apply(ctx) {
       // The live iframe element, present only while the map view is mounted.
       let frame = null
       // Loading veil: the canvas is revealed only once it reports ready, so the
       // unstyled first paint (and the frame's own sidebar/tab strip) is never
       // visible. A timer guarantees it always appears even if that never comes.
       let veil = null
-      let revealTimer = 0
       const revealFrame = () => {
         if (veil === null) return
         veil.classList.add('dsh-synapse-veil-hidden')
@@ -788,36 +805,23 @@ window.__ModuleLoader__.load({
         '.dsh-codex-sidechat-fold-title{flex:none;color:var(--dsw-alias-label-primary)}',
         '.dsh-codex-sidechat-think-leading svg,.dsh-codex-sidechat-toolrow-leading svg{display:block;width:14px;height:14px}',
         '.dsh-codex-sidechat-md-fallback{white-space:pre-wrap;word-break:break-word}',
+        '.dsh-synapse-detail-error{color:var(--dsw-alias-label-tertiary);font-size:12px;line-height:20px}',
         SIDECHAT_TURN_CSS,
       ].join('\n')
       document.head.append(style)
-      const send = (type, payload) => { frame?.contentWindow?.postMessage({ source: 'dsh-synapse', type, ...payload }, location.origin) }
+      const send = (type, payload) => { frame?.contentWindow?.postMessage({ source: 'dsh-synapse', type, ...payload }, bridgeTargetOrigin(location)) }
       let syncQueued = false
+      let stopped = false
       let knownSessionIds = new Set()
-      const liveUnsubscribers = new Map()
-      const syncLiveSessions = () => {
-        const snapshot = ctx.sessions.list.getSnapshot()
-        for (const id of snapshot.ids) {
-          if (liveUnsubscribers.has(id)) continue
-          const scope = ctx.sessions.scope(id)
-          const session = scope === undefined ? undefined : ctx.sessions.sessionOf(scope)
-          if (session === undefined) continue
-          const publish = () => {
-            if (frame === null) return
-            const state = session.getSnapshot()
-            const text = state.partial?.blocks.filter(block => block.kind === 'text').map(block => block.text).join('\n') ?? ''
-            send('synapse:live-reply', { sessionId: id, running: state.running, text })
-          }
-          liveUnsubscribers.set(id, session.subscribe(publish))
-          publish()
-        }
-        for (const [id, unsubscribe] of liveUnsubscribers) if (!snapshot.ids.includes(id)) { unsubscribe(); liveUnsubscribers.delete(id) }
-      }
+      const liveBridge = createLiveReplyBridge(ctx, send, window, error => reportSynapseError('live reply bridge', error))
+      const contextPublisher = createContextPublisher(
+        () => ({ session: currentSession(ctx), workspaces: workspaceSnapshot(ctx) }), send, window)
       const syncSessions = () => {
         if (syncQueued) return
         syncQueued = true
         queueMicrotask(() => {
           syncQueued = false
+          if (stopped) return
           const sessions = sessionSnapshot(ctx)
           const sessionIds = new Set(sessions.map(session => session.id))
           const removedSessionIds = [...knownSessionIds].filter(id => !sessionIds.has(id))
@@ -831,12 +835,9 @@ window.__ModuleLoader__.load({
       }
       const syncCurrentSession = () => {
         syncSessions()
-        syncLiveSessions()
+        if (frame !== null) contextPublisher.sync()
+        liveBridge.sync()
         syncTheme()
-        if (frame !== null) {
-          send('synapse:workspaces', { workspaces: workspaceSnapshot(ctx) })
-          send('synapse:current-session', { session: currentSession(ctx) })
-        }
       }
       const switchToDialogTab = () => {
         for (const tab of document.querySelectorAll('[role="tab"]')) {
@@ -844,17 +845,16 @@ window.__ModuleLoader__.load({
         }
       }
       const onMessage = event => {
-        if (event.origin !== location.origin || event.data?.source !== 'dsh-synapse') return
+        if (!isBridgeEvent(event, frame?.contentWindow, location)) return
         // The iframe's own 「对话」 button asks to leave the map.
         if (event.data.type === 'synapse:close') return switchToDialogTab()
         // Canvas rendered: drop the loading veil.
         if (event.data.type === 'synapse:map-ready') return revealFrame()
         if (event.data.type === 'synapse:request-current') {
-          send('synapse:workspaces', { workspaces: workspaceSnapshot(ctx) })
-          return send('synapse:current-session', { session: currentSession(ctx) })
+          return contextPublisher.force()
         }
         if (event.data.type === 'synapse:open-session') {
-          try { ctx.sessions.open(event.data.sessionId); switchToDialogTab() } catch { send('synapse:bridge-error', { message: '关联的会话已不可用' }) }
+          try { openSession(ctx, event.data.sessionId); switchToDialogTab() } catch { send('synapse:bridge-error', { message: '关联的会话已不可用' }) }
           // Best-effort anchor to the requested turn: chat nodes expose their
           // source event seq (anchorSeq) and render with data-chat-anchor-key,
           // so resolve seq -> node key -> scroll once the view materializes.
@@ -864,7 +864,7 @@ window.__ModuleLoader__.load({
               const scope = ctx.sessions.scope(event.data.sessionId)
               const session = scope === undefined ? undefined : ctx.sessions.sessionOf(scope)
               if (session === undefined) return
-              const chat = session.getSnapshot()?.chat
+              const chat = chatTargetOf(ctx, event.data.sessionId)?.getSnapshot()
               if (chat === undefined) return
               let key = undefined
               for (const node of chat.nodes.values()) {
@@ -887,10 +887,6 @@ window.__ModuleLoader__.load({
             turnWatch.set(null)
             return
           }
-          try { ctx.sessions.open(sessionId) } catch {
-            send('synapse:bridge-error', { message: '关联的会话已不可用' })
-            return
-          }
           turnWatch.set({
             sessionId,
             seq: Number.isInteger(event.data.seq) ? event.data.seq : undefined,
@@ -906,7 +902,7 @@ window.__ModuleLoader__.load({
           // Bidirectional current-session sync: switch DSH's current session
           // without leaving the map; the sessions-list subscription re-sends
           // synapse:current-session so the map follows the new highlight.
-          try { ctx.sessions.open(event.data.sessionId) } catch { send('synapse:bridge-error', { message: '关联的会话已不可用' }) }
+          try { openSession(ctx, event.data.sessionId) } catch { send('synapse:bridge-error', { message: '关联的会话已不可用' }) }
           return
         }
         if (event.data.type === 'synapse:fork-session') {
@@ -959,7 +955,7 @@ window.__ModuleLoader__.load({
       const isTyping = target => target instanceof HTMLElement
         && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.tagName === 'SELECT' || target.isContentEditable === true)
       const forwardSpace = down => {
-        frame?.contentWindow?.postMessage({ source: 'dsh-synapse', type: 'synapse:space-pan', down }, location.origin)
+        frame?.contentWindow?.postMessage({ source: 'dsh-synapse', type: 'synapse:space-pan', down }, bridgeTargetOrigin(location))
       }
       const onSpaceDown = event => {
         if (frame === null || isSpaceEvent(event) !== true || event.repeat === true) return
@@ -980,6 +976,7 @@ window.__ModuleLoader__.load({
         themeObserver.observe(document.body, { attributes: true, attributeFilter: ['data-ds-dark-theme'] })
       }
       const unsubscribeSessions = ctx.sessions.list.subscribe(syncCurrentSession)
+      const unsubscribeCurrentSession = ctx.uiSession?.current?.subscribe(syncCurrentSession)
       const unsubscribeWorkspaces = ctx.workspaces.list.subscribe(syncCurrentSession)
       window.addEventListener('message', onMessage)
       window.addEventListener('keydown', onKeyDown)
@@ -992,9 +989,11 @@ window.__ModuleLoader__.load({
         const veilRef = React.useRef(null)
         const watch = React.useSyncExternalStore(listener => turnWatch.subscribe(listener), () => turnWatch.get())
         React.useEffect(() => {
-          frame = ref.current
+          const mountedFrame = ref.current
+          frame = mountedFrame
           veil = veilRef.current
-          revealTimer = window.setTimeout(revealFrame, 1500)
+          const revealTimer = window.setTimeout(() => { if (frame === mountedFrame) revealFrame() }, 1500)
+          liveBridge.setActive(true)
           setChromeHidden(true)
           // Those panels are portalled into <body> and remount on session
           // switches, so the hide is re-asserted as the DOM changes.
@@ -1003,21 +1002,23 @@ window.__ModuleLoader__.load({
           return () => {
             window.clearTimeout(revealTimer)
             chromeObserver.disconnect()
+            if (frame !== mountedFrame) return
             frame = null
             veil = null
+            liveBridge.setActive(false)
             turnWatch.set(null)
             setChromeHidden(false)
           }
         }, [])
         const openTurnInDialog = () => {
           if (watch === null) return
-          try { ctx.sessions.open(watch.sessionId); switchToDialogTab() } catch { send('synapse:bridge-error', { message: '关联的会话已不可用' }) }
+          try { openSession(ctx, watch.sessionId); switchToDialogTab() } catch { send('synapse:bridge-error', { message: '关联的会话已不可用' }) }
           const seq = watch.seq
           if (!Number.isInteger(seq)) return
           const tryScroll = attempt => {
             const scope = ctx.sessions.scope(watch.sessionId)
             const session = scope === undefined ? undefined : ctx.sessions.sessionOf(scope)
-            const chat = session?.getSnapshot()?.chat
+            const chat = chatTargetOf(ctx, watch.sessionId)?.getSnapshot()
             if (chat === undefined) {
               if (attempt < 3) window.setTimeout(() => tryScroll(attempt + 1), 500)
               return
@@ -1045,23 +1046,26 @@ window.__ModuleLoader__.load({
             src: '/synapse/',
             onLoad: event => {
               const element = event.currentTarget
+              if (ref.current !== element) return
+              frame = element
               injectCanvasStyle(element?.contentDocument)
               syncCurrentSession()
+              contextPublisher.force()
+              liveBridge.replay()
               // Sent from the element, not the `frame` binding: a cached frame
               // can finish loading before this effect has run.
               element?.contentWindow?.postMessage(
                 { source: 'dsh-synapse', type: 'synapse:map-opened' },
-                location.origin,
+                bridgeTargetOrigin(location),
               )
             },
           }),
           h('div', { ref: veilRef, className: 'dsh-synapse-veil' }),
-          watch ? h(SynapseTurnPane, {
-            watch,
-            ctx,
+          watch ? h(TurnPaneBoundary, {
+            key: `${watch.sessionId}:${watch.seq ?? watch.turnIndex}:${watch.cardId}`,
+            sessionId: watch.sessionId,
             onClose: () => turnWatch.set(null),
-            onOpenInDialog: openTurnInDialog,
-          }) : null,
+          }, h(SynapseTurnPane, { watch, ctx, onClose: () => turnWatch.set(null), onOpenInDialog: openTurnInDialog })) : null,
         )
       }
 
@@ -1104,17 +1108,17 @@ window.__ModuleLoader__.load({
       }, SynapseTabGate)), 'synapse: tab placement')
 
       ctx.effect(() => () => {
+        stopped = true
         window.removeEventListener('message', onMessage)
         window.removeEventListener('keydown', onKeyDown)
         window.removeEventListener('keydown', onSpaceDown)
         window.removeEventListener('keyup', onSpaceUp)
         themeObserver?.disconnect()
         unsubscribeSessions()
+        unsubscribeCurrentSession?.()
         unsubscribeWorkspaces()
-        for (const unsubscribe of liveUnsubscribers.values()) unsubscribe()
+        liveBridge.dispose()
+        contextPublisher.dispose()
         style.remove()
       }, 'synapse: web workspace switch')
     }
-    return module.exports
-  },
-})

@@ -51,6 +51,44 @@ test('keeps a failed turn visible when Harness produces no assistant message', a
   assert.equal(card.canContinue, true)
 })
 
+test('empty sessions and standalone errors or tool records do not manufacture cards', async () => {
+  const { conversationCards } = await loadConversationCards()
+  const cards = conversationCards([
+    { id: 'empty', parentId: null, title: 'Session title is not a message', messages: [] },
+    { id: 'error', parentId: null, messages: [{ kind: 'error', text: 'Unattached error', sourceSeq: 2 }] },
+    { id: 'tool', parentId: null, messages: [{ kind: 'tool', text: 'tool output', sourceSeq: 3 }] },
+  ])
+  assert.equal(cards.length, 0)
+})
+
+test('keeps a real reply at a fork boundary and connects through an empty intermediate fork', async () => {
+  const { conversationCards } = await loadConversationCards()
+  const cards = conversationCards([
+    { id: 'root', parentId: null, messages: [{ kind: 'user', text: 'Original question', sourceSeq: 1 }, { kind: 'assistant', text: 'Original answer', sourceSeq: 3 }] },
+    { id: 'empty-fork', parentId: 'root', sourceSeedLength: 2, messages: [] },
+    { id: 'fork', parentId: 'empty-fork', sourceSeedLength: 4, messages: [{ kind: 'assistant', text: 'Alternative answer', sourceSeq: 5 }, { kind: 'user', text: 'Follow up', sourceSeq: 7 }] },
+  ])
+  assert.equal(cards.length, 3)
+  assert.equal(cards[1].question, '')
+  assert.equal(cards[1].answer.text, 'Alternative answer')
+  assert.equal(cards[1].parentId, cards[0].id)
+  assert.equal(cards[2].parentId, cards[1].id)
+})
+
+test('a later successful reply clears old failure status and other turns cannot mark it failed', async () => {
+  const { conversationCards } = await loadConversationCards()
+  const [card] = conversationCards([{
+    id: 'session', parentId: null, messages: [
+      { kind: 'user', text: 'Question', sourceSeq: 1, turn: 1 },
+      { kind: 'error', text: 'First attempt failed', sourceSeq: 2, turn: 1 },
+      { kind: 'assistant', text: 'Successful retry', sourceSeq: 3, turn: 2 },
+      { kind: 'error', text: 'Unentered turn failed', sourceSeq: 4, turn: 3 },
+    ],
+  }])
+  assert.equal(card.answer.text, 'Successful retry')
+  assert.equal(card.error, null)
+})
+
 test('connects a restored fork to its DSH seed boundary, not its canvas position', async () => {
   const { conversationCards } = await loadConversationCards()
   const cards = conversationCards([

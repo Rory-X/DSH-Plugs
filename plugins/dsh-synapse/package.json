@@ -6,23 +6,27 @@
   "main": "index.js",
   "exports": {
     ".": "./index.js",
-    "./client": "./client.js",
+    "./client": "./lib/client.js",
     "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
   "files": [
     "index.js",
     "client.js",
+    "client-state.js",
     "app.js",
     "deepseek-mark.svg",
     "styles.css",
     "docs",
     "cordis.patch.yml",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "lib/client.js"
   ],
   "scripts": {
-    "build": "node --check index.js && node --check client.js && node --check app.js",
+    "build": "node --check index.js && node --check client.js && node --check app.js && tsdown -c tsdown.client.config.ts",
+    "build:desktop": "pnpm run build && tsdown -c tsdown.desktop.config.ts && node scripts/package-desktop.mjs",
+    "test:desktop": "pnpm run build:desktop && node --test test/desktop-package.smoke.js",
     "prepare": "pnpm run build",
     "test": "node --test test/*.test.js"
   },
@@ -37,9 +41,25 @@
     "client": {
       "platform": "web",
       "inject": [
-        "@deepseek-ai/dsh-client-runtime"
+        "@deepseek-ai/dsh-api-session-controller",
+        "@deepseek-ai/dsh-api-workspace-controller",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-chat",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-session",
+        "@deepseek-ai/dsh-client-ui-workspace",
+        "@deepseek-ai/dsh-client-ui-primitives"
       ],
       "immediately": false
     }
+  },
+  "dependencies": {
+    "@just-genius/dsh-plugin-runtime": "workspace:*"
+  },
+  "devDependencies": {
+    "@just-genius/dsh-plugin-ui": "workspace:*"
+  },
+  "peerDependencies": {
+    "react": "^18.2.0"
   }
 }

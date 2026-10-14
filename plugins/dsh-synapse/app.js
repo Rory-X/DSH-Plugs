@@ -57,7 +57,7 @@ const state = {
   summaries: [], workspace: null, activeId: null, selectedCardId: null, mode: 'canvas', zoom: 1, currentDsh: null, sidebarCollapsed: false,
   dshWorkspaces: [], selectedDshWorkspaceId: null,
   historyBySession: new Map(), historyRequests: new Map(), pendingReplies: new Map(), pendingRpc: new Map(), liveReplies: new Map(),
-  draft: null, error: '', workspaceLoad: 0, branchAnchors: new Map(savedBranchAnchors), cardPositions: new Map(savedCardPositions), collapsedCardIds: new Set(savedCollapsedCards), quickPhrases: savedQuickPhrases, quickPhraseEditorOpen: false,
+  draft: null, error: '', workspaceLoad: 0, sessionContextVersion: 0, branchAnchors: new Map(savedBranchAnchors), cardPositions: new Map(savedCardPositions), collapsedCardIds: new Set(savedCollapsedCards), quickPhrases: savedQuickPhrases, quickPhraseEditorOpen: false,
   dragging: false, canvasGesture: false, canvasRefreshAfter: 0, canvasViewInitialized: false, canvasCamera: { x: 0, y: 0 }, mapCardSessionSwitches: new Set(),
   expandedMessageIds: new Set(),
   canvasCards: undefined, canvasCardsById: undefined, canvasGraph: undefined, mountedCardIds: new Set(), canvasNeedsCenter: false,
@@ -114,8 +114,19 @@ async function api(path, options = {}) {
   return body
 }
 
+function bridgeTargetOrigin(location) {
+  // Electron's custom scheme can have an opaque postMessage origin.
+  return location.protocol === 'dsh-app:' ? '*' : location.origin
+}
+
+function isBridgeEvent(event, peer, location) {
+  if (peer == null || event.source !== peer || event.data?.source !== 'dsh-synapse') return false
+  return event.origin === location.origin || location.protocol === 'dsh-app:'
+    && (event.origin === 'null' || event.origin === `${location.protocol}//${location.host}`)
+}
+
 function post(type, payload = {}) {
-  if (window.parent !== window) window.parent.postMessage({ source: 'dsh-synapse', type, ...payload }, window.location.origin)
+  if (window.parent !== window) window.parent.postMessage({ source: 'dsh-synapse', type, ...payload }, bridgeTargetOrigin(window.location))
 }
 
 // The host turn pane and the in-canvas inspector occupy the same right rail.
@@ -148,8 +159,8 @@ function watchCardTurn(thread, cardId) {
   if (thread.dshSessionId === null || typeof cardId !== 'string') return
   if (state.inspectorCardId !== null) closeCardInspector({ animate: false })
   const card = state.canvasCardsById?.get(cardId)
-  if (thread.dshSessionId !== state.currentDsh?.id) state.mapCardSessionSwitches.add(thread.dshSessionId)
-  post('synapse:activate-session', { sessionId: thread.dshSessionId })
+  // Details only observe this card. Selecting its session here can replace the
+  // host view (and unmount the canvas) before the turn pane finishes opening.
   post('synapse:watch-turn', {
     sessionId: thread.dshSessionId,
     seq: Number.isInteger(card?.sourceSeq) ? card.sourceSeq : undefined,
@@ -261,7 +272,8 @@ function messagesFromEvents(events) {
     // user-role messages but are not real user turns: they must not become
     // their own conversation card.
     const injected = /^(?:Current runtime context\. This snapshot supersedes earlier runtime-context snapshots\.|<(?:system-reminder|system|context|environment|reminder)\b[^>]*>)/i
-    if (event?.type === 'user/message' && text && !injected.test(text.trimStart())) return [{ kind: 'user', text, at: event.time, sourceSeq: event.seq }]
+    const source = event?.data?.source?.kind
+    if (event?.type === 'user/message' && text && (source === 'user' || source === undefined && !injected.test(text.trimStart()))) return [{ kind: 'user', text, at: event.time, sourceSeq: event.seq }]
     if (event?.type === 'assistant/message' && text) return [{ kind: 'assistant', text, at: event.time, sourceSeq: event.seq }]
     return []
   })
@@ -291,12 +303,19 @@ function currentDshThread(threads = state.workspace?.threads ?? []) {
   return typeof id === 'string' ? threads.find(thread => thread.dshSessionId === id) : undefined
 }
 
-// A workspace can hold dozens of unrelated sessions. The map shows the current
-// DSH session and the fork family it belongs to — ancestors and their
-// descendants — so a branch stays on the same canvas as the turn it left.
-// Unrelated sessions stay reachable by switching the DSH session itself.
-// Until the current session has a projected thread, fall back to the whole
-// workspace so the canvas is never blank during that race.
+// Resolve durable session lineage across projection workspaces. Old canvas
+// node IDs can be stale after a session is restored or moved to another cwd.
+function resolveThreadParents(threads) {
+  const bySession = new Map(threads.filter(thread => thread.dshSessionId).map(thread => [thread.dshSessionId, thread]))
+  return threads.map(thread => ({
+    ...thread,
+    parentId: thread.sourceParentSessionId === undefined ? thread.parentId ?? null
+      : bySession.get(thread.sourceParentSessionId)?.id ?? null,
+  }))
+}
+
+// Only descendants of the selected session, plus its direct ancestor path.
+// Expanding descendants from every ancestor would also include sibling forks.
 function threadFamily(threads, start) {
   if (start === undefined) return []
   const byId = new Map(threads.map(thread => [thread.id, thread]))
@@ -308,11 +327,13 @@ function threadFamily(threads, start) {
     ids.add(cursor.id)
     cursor = cursor.parentId === null ? undefined : byId.get(cursor.parentId)
   }
+  const descendants = new Set([start.id])
   let changed = true
   while (changed) {
     changed = false
     for (const thread of threads) {
-      if (ids.has(thread.id) || thread.parentId === null || !ids.has(thread.parentId)) continue
+      if (descendants.has(thread.id) || thread.parentId === null || !descendants.has(thread.parentId)) continue
+      descendants.add(thread.id)
       ids.add(thread.id)
       changed = true
     }
@@ -321,12 +342,15 @@ function threadFamily(threads, start) {
 }
 
 function visibleThreads() {
-  const threads = state.workspace?.threads ?? []
   const id = state.currentDsh?.id
-  if (typeof id !== 'string') return threads
+  if (typeof id !== 'string') return []
+  const projected = state.workspace?.threads ?? []
+  // A new, still-empty fork has no projection yet, but its known ancestors
+  // already have real messages. The temporary thread never creates a card.
+  const pending = { id: `pending-session:${id}`, dshSessionId: id, sourceParentSessionId: state.currentDsh.parentId ?? null, messages: [] }
+  const threads = resolveThreadParents(projected.some(thread => thread.dshSessionId === id) ? projected : [...projected, pending])
   const current = threads.find(thread => thread.dshSessionId === id)
-  if (current === undefined) return threads
-  return threadFamily(threads, current)
+  return threadFamily(threads, current).filter(thread => thread.id !== pending.id)
 }
 
 function workspaceChoices() {
@@ -337,28 +361,15 @@ function workspaceChoices() {
 async function threadsForDshWorkspace(workspace) {
   if (workspace.sessionIds.length === 0) return []
   const requested = new Set(workspace.sessionIds)
+  if (requested.has(state.currentDsh?.id) && typeof state.currentDsh.parentId === 'string') requested.add(state.currentDsh.parentId)
   const projections = await Promise.all(state.summaries.map(summary => api(`/synapse/api/workspaces/${summary.id}`)))
-  const all = projections.flatMap(projection => projection.workspace.threads)
-  const loaded = []
+  const all = resolveThreadParents(projections.flatMap(projection => projection.workspace.threads))
   const loadedIds = new Set()
   for (const thread of all) {
     if (!requested.has(thread.dshSessionId)) continue
-    loaded.push(thread)
-    loadedIds.add(thread.id)
+    for (const relative of threadFamily(all, thread)) loadedIds.add(relative.id)
   }
-  // A just-forked child can land in the projection before DSH adds it to the
-  // workspace session list. Keep those descendants so the map can draw them.
-  let changed = true
-  while (changed) {
-    changed = false
-    for (const thread of all) {
-      if (loadedIds.has(thread.id) || thread.parentId === null || !loadedIds.has(thread.parentId)) continue
-      loaded.push(thread)
-      loadedIds.add(thread.id)
-      changed = true
-    }
-  }
-  return loaded
+  return all.filter(thread => loadedIds.has(thread.id))
 }
 
 async function openDshWorkspace(id, { renderAfter = true, preserveCanvasCamera = false } = {}) {
@@ -413,11 +424,9 @@ async function openWorkspace(id, { renderAfter = true } = {}) {
 }
 
 async function refreshProjection() {
-  const summariesChanged = await refreshSummaries({ renderAfter: false })
-  if (!summariesChanged || state.workspace === null || !canReplaceView()) return summariesChanged
-  if (state.selectedDshWorkspaceId !== null) await openDshWorkspace(state.selectedDshWorkspaceId)
-  else await openWorkspace(state.workspace.id)
-  return true
+  // refreshSummaries already loads a changed workspace. Loading it a second
+  // time duplicates requests and lets an older completion replace the view.
+  return refreshSummaries()
 }
 
 function openNewSession() {
@@ -537,7 +546,7 @@ function settlePendingReply(thread, messages) {
   const pending = state.pendingReplies.get(thread.dshSessionId)
   if (pending === undefined) return false
   const userIndex = pendingUserIndex(messages, pending)
-  if (userIndex === -1 || !messages.slice(userIndex + 1).some(message => message.kind === 'assistant')) return false
+  if (userIndex === -1 || !messages.slice(userIndex + 1).some(message => message.kind === 'assistant' || message.kind === 'error')) return false
   state.pendingReplies.delete(thread.dshSessionId)
   return true
 }
@@ -546,7 +555,9 @@ function messagesFor(thread) {
   // A runtime-context snapshot is internal DSH state, never a user turn.
   // Filter here as well as during persistence so existing saved workspaces
   // immediately render one question and its answer as one card.
-  const messages = persistedMessagesFor(thread).filter(message => !(message.kind === 'user' && typeof message.text === 'string' && message.text.trimStart().startsWith('Current runtime context. This snapshot supersedes earlier runtime-context snapshots.')))
+  const injected = /^(?:Current runtime context\. This snapshot supersedes earlier runtime-context snapshots\.|<(?:system-reminder|system|context|environment|reminder)\b[^>]*>)/i
+  const messages = persistedMessagesFor(thread).filter(message => message.kind !== 'user'
+    || (message.source?.kind === undefined ? !injected.test(String(message.text).trimStart()) : message.source.kind === 'user'))
   const pending = state.pendingReplies.get(thread.dshSessionId)
   if (pending === undefined) return messages
   if (settlePendingReply(thread, messages)) {
@@ -799,22 +810,28 @@ function conversationCards(threads) {
   for (const thread of threads) {
     const messages = messagesFor(thread)
     const turns = []
+    const firstDialogue = messages.findIndex(message => message.kind === 'user' || message.kind === 'assistant')
     for (let messageIndex = 0; messageIndex < messages.length; messageIndex++) {
       const question = messages[messageIndex]
-      if (question.kind !== 'user') continue
+      // A fork at a user message can start with an assistant reply. It remains
+      // a real card even though the question is already on the ancestor path.
+      const replyOnly = question.kind === 'assistant' && messageIndex === firstDialogue
+      if (question.kind !== 'user' && !replyOnly) continue
       const replies = []
       const errors = []
       let processCount = 0
-      for (let replyIndex = messageIndex + 1; replyIndex < messages.length; replyIndex++) {
+      for (let replyIndex = messageIndex + (replyOnly ? 0 : 1); replyIndex < messages.length; replyIndex++) {
         const reply = messages[replyIndex]
         if (reply.kind === 'user') break
         if (reply.kind === 'assistant') replies.push(reply)
-        if (reply.kind === 'error') errors.push(reply)
+        const turn = replies.at(-1)?.turn ?? question.turn
+        if (reply.kind === 'error' && (turn === undefined || reply.turn === undefined || turn === reply.turn)) errors.push(reply)
         if (Array.isArray(reply.process)) processCount += reply.process.length
         else if (reply.kind === 'tool') processCount += 1
       }
       const answer = replies.at(-1) ?? null
-      const error = errors.at(-1) ?? null
+      const lastError = errors.at(-1)
+      const error = lastError && (answer === null || messages.indexOf(lastError) > messages.indexOf(answer)) ? lastError : null
       const turnIndex = turns.length
       const id = `${thread.id}:turn:${question.sourceSeq ?? messageIndex}`
       const previous = turns.at(-1)
@@ -834,7 +851,7 @@ function conversationCards(threads) {
         naturalPosition,
         position,
         positionLocked,
-        question: question.text,
+        question: replyOnly ? '' : question.text,
         answer,
         error,
         processCount,
@@ -843,30 +860,7 @@ function conversationCards(threads) {
     const liveReply = state.liveReplies.get(thread.dshSessionId)
     const latestTurn = turns.at(-1)
     if (liveReply?.running && latestTurn !== undefined && (latestTurn.answer === null || latestTurn.answer.pending === true)) latestTurn.answer = { kind: 'assistant', text: liveReply.text, pending: true, at: new Date().toISOString() }
-    if (turns.length === 0) {
-      const id = `${thread.id}:turn:empty`
-      const positionKey = `${thread.id}:turn-index:0`
-      const naturalPosition = { x: 86, y: 82 }
-      const savedPosition = state.cardPositions?.get(id) ?? state.cardPositions?.get(positionKey)
-      const positionLocked = savedPosition !== undefined
-      turns.push({
-      id,
-      positionKey,
-      dshThreadId: thread.id,
-      sourceParentId: thread.parentId,
-      parentId: null,
-      sourceSeq: undefined,
-      turnIndex: 0,
-      naturalPosition,
-      position: positionLocked ? savedPosition : naturalPosition,
-      positionLocked,
-      question: thread.dshSessionTitle ?? thread.title,
-      answer: null,
-      error: null,
-      processCount: 0,
-      })
-    }
-    turns.at(-1).canContinue = true
+    if (turns.length > 0) turns.at(-1).canContinue = true
     cardsByThread.set(thread.id, turns)
     cards.push(...turns)
   }
@@ -874,17 +868,26 @@ function conversationCards(threads) {
     const siblings = cardsByThread.get(card.dshThreadId)
     if (card.turnIndex > 0) card.parentId = siblings[card.turnIndex - 1].id
     else {
-      const parentCards = cardsByThread.get(card.sourceParentId)
+      let parentCards = cardsByThread.get(card.sourceParentId)
       const sourceThread = threads.find(thread => thread.id === card.dshThreadId)
       const firstChildQuestion = siblings?.[0]
-      const seedLength = sourceThread?.sourceSeedLength ?? firstChildQuestion?.sourceSeq
+      let seedLength = sourceThread?.sourceSeedLength ?? firstChildQuestion?.sourceSeq
+      let parentThread = threads.find(thread => thread.id === card.sourceParentId)
+      const visited = new Set([card.dshThreadId])
+      while (parentThread && !parentCards?.length && !visited.has(parentThread.id)) {
+        visited.add(parentThread.id)
+        if (Number.isSafeInteger(parentThread.sourceSeedLength)) seedLength = Math.min(seedLength ?? Infinity, parentThread.sourceSeedLength)
+        parentCards = cardsByThread.get(parentThread.parentId)
+        parentThread = threads.find(thread => thread.id === parentThread.parentId)
+      }
       // A fork inherits every parent event before DSH's durable seed boundary.
       // The latest parent question below that boundary is the exact Turn where
       // this child was born. Canvas coordinates never participate in lineage.
       const inheritedTurn = Number.isSafeInteger(seedLength)
         ? parentCards?.filter(candidate => Number.isInteger(candidate.sourceSeq) && candidate.sourceSeq < seedLength).at(-1)
         : undefined
-      card.parentId = state.branchAnchors.get(card.dshThreadId) ?? inheritedTurn?.id ?? null
+      const anchor = state.branchAnchors.get(card.dshThreadId)
+      card.parentId = parentCards?.some(parent => parent.id === anchor) ? anchor : inheritedTurn?.id ?? null
     }
   }
   return layoutConversationGraph(cards, threads)
@@ -1170,7 +1173,6 @@ function syncCanvasViewport() {
 
 function renderCanvas() {
   const threads = visibleThreads()
-  if (threads.length === 0 && state.draft?.kind !== 'new') return `<section class="empty-canvas"><strong>当前工作目录还没有 DSH 对话。</strong><p>点击新会话，在画布中输入第一条消息。</p><div><button class="primary" type="button" data-action="create-session">新建会话</button></div></section>`
   const allCards = conversationCards(threads)
   const graph = conversationGraphView(allCards)
   const cards = graph.cards
@@ -1181,6 +1183,7 @@ function renderCanvas() {
     state.inspectorCardId = null
     state.inspectorOpening = false
   }
+  if (cards.length === 0 && state.draft === null) return `<section class="empty-canvas"><strong>当前会话暂无可显示的消息。</strong><p>消息加载完成后会自动显示，也可以返回对话继续交流。</p></section>`
   if (!state.canvasViewInitialized) {
     state.canvasCamera = initialCanvasCamera(cards)
     state.canvasViewInitialized = true
@@ -1239,10 +1242,11 @@ function messagesForCard(card) {
   const thread = state.workspace?.threads.find(item => item.id === card.dshThreadId)
   if (thread === undefined) return { thread: null, messages: [] }
   const messages = messagesFor(thread)
+  const firstDialogue = messages.findIndex(message => message.kind === 'user' || message.kind === 'assistant')
   let turnIndex = -1
   let start = -1
   for (let index = 0; index < messages.length; index++) {
-    if (messages[index].kind !== 'user') continue
+    if (messages[index].kind !== 'user' && !(index === firstDialogue && messages[index].kind === 'assistant')) continue
     turnIndex += 1
     if (turnIndex === card.turnIndex) {
       start = index
@@ -1995,9 +1999,22 @@ app.addEventListener('submit', event => {
   void sendMessage(thread, text).catch(setError)
 })
 
+function receiveDshWorkspaces(workspaces) {
+  const next = Array.isArray(workspaces) ? workspaces.filter(workspace => typeof workspace?.id === 'string' && typeof workspace.title === 'string' && Array.isArray(workspace.sessionIds)) : []
+  if (JSON.stringify(next) === JSON.stringify(state.dshWorkspaces)) return false
+  state.dshWorkspaces = next
+  return true
+}
+
 window.addEventListener('message', event => {
-  if (event.origin !== window.location.origin || event.data?.source !== 'dsh-synapse') return
-  const data = event.data
+  if (!isBridgeEvent(event, window.parent, window.location)) return
+  let data = event.data
+  if (data.type === 'synapse:context') {
+    // Install session and workspace metadata in the same event. A separate
+    // workspace message used to start a load scoped to the previous session.
+    const workspacesChanged = receiveDshWorkspaces(data.workspaces)
+    data = { ...data, type: 'synapse:current-session', workspacesChanged }
+  }
   if (data.type === 'synapse:close-inspector') {
     if (state.inspectorCardId !== null) closeCardInspector({ animate: false })
     return
@@ -2015,13 +2032,14 @@ window.addEventListener('message', event => {
     document.documentElement.dataset.theme = data.dark === true ? 'dark' : 'light'
   }
   if (data.type === 'synapse:workspaces') {
-    state.dshWorkspaces = Array.isArray(data.workspaces) ? data.workspaces.filter(workspace => typeof workspace?.id === 'string' && typeof workspace.title === 'string' && Array.isArray(workspace.sessionIds)) : []
+    if (!receiveDshWorkspaces(data.workspaces)) return
     const current = currentDshWorkspace()
     if (current !== undefined && current.id !== state.selectedDshWorkspaceId) void openDshWorkspace(current.id).catch(setError)
     else if (state.selectedDshWorkspaceId !== null) void openDshWorkspace(state.selectedDshWorkspaceId).catch(setError)
     else if (canReplaceView()) render()
   }
   if (data.type === 'synapse:current-session') {
+    const contextVersion = ++state.sessionContextVersion
     const previousId = state.currentDsh?.id
     // The canvas is scoped to the current session, so a switch replaces its
     // whole content: the old camera would point at coordinates that no longer
@@ -2042,11 +2060,16 @@ window.addEventListener('message', event => {
       }
       if (state.workspace !== null) revealConversationThread(conversationCards(visibleThreads()), thread.id)
     }
-    if (previousId !== data.session?.id) {
+    if (previousId !== data.session?.id || data.workspacesChanged === true) {
       // A real session switch: re-center on the new session's latest turn,
       // whether it lives in the same workspace (openCurrentWorkspace returns
       // false) or a different one (it resets the camera itself).
-      void openCurrentWorkspace({ preserveCanvasCamera }).then(opened => {
+      const workspace = currentDshWorkspace()
+      const opening = data.workspacesChanged === true && workspace !== undefined
+        ? openDshWorkspace(workspace.id, { preserveCanvasCamera })
+        : openCurrentWorkspace({ preserveCanvasCamera })
+      void opening.then(opened => {
+        if (contextVersion !== state.sessionContextVersion) return
         if (!opened && canReplaceView()) {
           render()
           if (!preserveCanvasCamera) focusActiveCard()
@@ -2081,17 +2104,16 @@ refreshSummaries().catch(setError)
 let polling = false
 let liveRenderTimer = 0
 let liveCardFrame = 0
-let liveCardSessionId = null
+const liveCardSessionIds = new Set()
 function scheduleLiveCardUpdate(sessionId) {
   // Coalesce streaming chunks to one DOM patch per animation frame.
-  liveCardSessionId = sessionId
+  liveCardSessionIds.add(sessionId)
   if (liveCardFrame !== 0) return
   liveCardFrame = window.requestAnimationFrame(() => {
     liveCardFrame = 0
-    if (liveCardSessionId === null) return
-    const id = liveCardSessionId
-    liveCardSessionId = null
-    applyLiveReplyToCard(id)
+    const ids = [...liveCardSessionIds]
+    liveCardSessionIds.clear()
+    for (const id of ids) applyLiveReplyToCard(id)
   })
 }
 function applyLiveReplyToCard(sessionId) {

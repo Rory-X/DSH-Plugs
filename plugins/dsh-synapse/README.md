@@ -31,6 +31,26 @@ corepack pnpm dsh web
 
 启动后，在 DSH 顶部切换到 **会话地图**。Synapse 复用现有的 DSH Web Server，不会启动第二个应用或代理系统。
 
+## 官方桌面端的本地构建
+
+官方桌面端使用独立的 `desktop` profile；它不会自动读取 `web` profile 的插件列表。桌面端的页面仍使用 `web` 客户端，因此不要把 manifest 中的 `dsh.client.platform` 改成 `desktop`。
+
+在本仓库根目录，使用 Node.js `>= 22.19.0` 执行：
+
+```powershell
+pnpm --filter dsh-synapse run test:desktop
+```
+
+`plugins/dsh-synapse/lib/desktop/` 是完整的独立插件包，包含服务端入口、编译后的客户端以及同目录静态资源。构建会内联所需的共享 runtime 代码，移除 monorepo 的 `workspace:*` 依赖，不会把旧版官方内核一起安装到桌面端。原有 Web 构建命令保持可用。
+
+安装时，将整个独立包复制到稳定目录，例如 `$DSH_HOME/plugins/synapse-desktop/`。在官方桌面端打开 **插件 → 添加插件**，输入该目录的绝对路径，安装成功后点击 **立即启用**。桌面端会管理本地目录链接和 `desktop` profile 的 bundle 注册；已验证可在运行中启用，无需退出应用。安装前仍建议备份 profile 和 Synapse 布局数据。
+
+不要直接链接 `lib/desktop/`，因为后续 Web 构建会清理 `lib/`。官方 `desktop` profile 是保留 profile，普通 `dsh plugin --profile desktop` 命令不能管理它，应使用桌面端自己的插件管理页。
+
+已核对官方桌面端 `0.1.7-rc.2`：服务端会话事件、`conversation.view` 页面挂载，以及 `/synapse/` 下的同源静态资源路由。Synapse 默认继续使用 `$DSH_HOME/synapse/workspaces.json` 保存布局；迁移不复制或改写原生会话。两个运行实例同时使用这一布局文件时没有跨进程写入锁，建议退出旧实例后再打开新实例。
+
+停用或卸载时，使用桌面端插件管理页中 `dsh-synapse` 的相应操作；保留 `synapse/workspaces.json` 可保留地图布局。若必须手工回退，先退出桌面端，仅移除 `desktop/package.json` 中的 `dsh-synapse` 依赖与 bundle，以及对应目录链接，不要覆盖其他插件和模型配置。
+
 ## 它解决什么问题
 
 | 能力 | 说明 |
@@ -43,6 +63,14 @@ corepack pnpm dsh web
 ## 从原生对话进入
 
 在 DSH 原生对话中，通过顶部的 **会话地图** 进入 Synapse；返回 **对话** 后，仍是同一个 DSH 会话。
+
+地图只显示当前会话、从它 fork 出来的后代，以及它的父会话和祖先会话。加载期间不会混入同工作区的其他会话；选中分支时，也不会带入祖先的其他分支。未打开的祖先通过只读历史加载补齐，fork 继承的消息在祖先卡片中展示，分支只展示自身新增的消息和回复。
+
+卡片的 **详情** 只在地图旁查看这一轮的内容，正在回复的内容会持续更新；查看其他分支的详情也会保留当前会话和地图位置。点击详情面板的 **在会话中打开** 才会切换到对应的原生对话。
+
+详情中的代码块、脚注和流式 Markdown 使用原生渲染器。单条内容格式化失败时会显示原文，可点击 **重试**；详情加载失败也可单独重试，地图会保持打开。客户端兼容早期会话接口以及 `0.2.0-rc.2` 的会话引用生命周期。
+
+卡片以原生会话中的真实提问和回复为依据。空会话、插件注入的上下文和独立运行错误不会生成卡片；真实提问的执行失败仍保留在对应卡片中。重新加载插件后，历史回放会修复旧投影缓存，并保留卡片布局。
 
 ![DSH 原生对话与会话地图入口](docs/images/native-webui.jpg)
 
@@ -60,7 +88,7 @@ corepack pnpm dsh web
 - DSH session log 保存真实会话内容；Synapse 只投影已提交的事件。
 - Synapse 的画布布局数据保存在 `$DSH_HOME/synapse/`，删除它不会删除 DSH 会话。
 - 插件不修改 prompt、模型请求、工具 schema、provider 路由或可复用 KV-cache 前缀。
-- 内置 patch 仅支持 DSH 的 `web` profile。
+- 内置 patch 复用 DSH Web Server，适用于 Web 客户端及官方桌面端。
 
 ## 开发
 
