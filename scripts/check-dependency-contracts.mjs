@@ -1,16 +1,11 @@
-import { readFile, readdir } from 'node:fs/promises'
+import { access, readFile, readdir } from 'node:fs/promises'
+import { join } from 'node:path'
 
-const DSH_LATEST = '0.1.1-rc.2'
+const DSH_LATEST = '0.1.5-rc.2'
 const VERSION_EXCEPTIONS = new Map([
   // This legacy package has not published in the 0.1.1 line. New code should
   // use SettingsSchemaService from dsh-client-ui-settings instead.
   ['@deepseek-ai/dsh-client-schema-form', '0.1.0-rc.7'],
-  // The version DSH actually seeds at runtime. It MUST track the seed, not a
-  // convenient older tag: pinning 0.1.0-rc.6 while 0.1.5-rc.1 is seeded let
-  // `MessageText` (deleted in 0.1.5) and the new required `labels` props pass
-  // a clean typecheck and then throw React #130 in the browser. Plugins reach
-  // this package only through packages/ui; direct imports remain forbidden.
-  ['@deepseek-ai/dsh-client-ui-primitives', '0.1.5-rc.1'],
 ])
 const errors = []
 
@@ -60,16 +55,27 @@ async function discoverManifests(root) {
   const paths = []
   const entries = await readdir(new URL(`../${root}/`, import.meta.url), { withFileTypes: true })
   for (const entry of entries) {
-    if (entry.isDirectory()) paths.push(`${root}/${entry.name}/package.json`)
+    if (!entry.isDirectory()) continue
+    const path = `${root}/${entry.name}/package.json`
+    try {
+      await access(path)
+      paths.push(path)
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error
+    }
   }
   return paths
 }
 
 async function discoverSourceFiles(root) {
-  const base = new URL(`../${root}/`, import.meta.url)
-  const entries = await readdir(base, { recursive: true, withFileTypes: true })
-  return entries
-    .filter(entry => entry.isFile() && /\.[cm]?[jt]sx?$/.test(entry.name))
-    .map(entry => `${entry.parentPath}/${entry.name}`)
-    .filter(path => !path.includes('/lib/') && !path.includes('/node_modules/'))
+  const paths = []
+  async function walk(directory) {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const path = join(directory, entry.name)
+      if (entry.isDirectory() && !['lib', 'dist', 'node_modules', '.git'].includes(entry.name)) await walk(path)
+      else if (entry.isFile() && /\.[cm]?[jt]sx?$/.test(entry.name)) paths.push(path)
+    }
+  }
+  await walk(root)
+  return paths
 }

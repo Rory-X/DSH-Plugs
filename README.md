@@ -40,7 +40,7 @@ Replaces the official Models settings page (fork of `ui-settings-models`) to add
 
 ### [@just-genius/dsh-notify-jump](plugins/dsh-notify-jump)
 
-Click a `dsh-notification` system banner to focus the window and open that session; when the DSH-Desktop bridge is present it routes through `window.dshDesktop.notify` so click-to-jump survives the Electron shell. Also notifies on the rising edge of approval / ask / plan-review waits.
+Session completion, approval, question, and plan-review notifications with click-to-session navigation. Uses DSH-Desktop's native notification permission and delivery bridge, with a browser fallback. Settings → Notifications includes permission status and a test button.
 
 ### [@just-genius/dsh-session-archive](plugins/dsh-session-archive)
 
@@ -69,7 +69,8 @@ hosted MCP HTTP, OAuth, and install/enable/disable state. Host UI lives in
 [`packages/ui`](packages/ui) (`@just-genius/dsh-plugin-ui`) ships DSH `--dsw-*` theme tokens plus React primitives (`Button`, `Input`, `Menu`, `Modal`, Markdown, confirmation and toast UI) and settings chrome. Plugins bundle it at build time; standalone apps (e.g. Vellum) can depend on it via `file:` / npm and call `installTheme()` once at boot. See [packages/ui/README.md](packages/ui/README.md).
 
 Official DSH contracts are pinned at the shared boundary to the newest tested
-published APIs (`0.1.1-rc.2` at this migration).
+published APIs (`0.1.5-rc.2`). Compatibility with the current package layout is
+handled by the shared runtime adapter.
 
 ## Repository layout
 
