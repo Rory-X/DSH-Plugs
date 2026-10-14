@@ -1,0 +1,31 @@
+export const zh = {
+  nav: '通知',
+  description: '本轮会话结束、等待审批或回答时通知你。点击通知可回到对应会话。',
+  desktop: '桌面系统通知', browser: '浏览器通知',
+  granted: '通知已允许', denied: '通知未被允许', pending: '尚未允许通知',
+  unknown: '暂时无法读取系统通知状态，可以发送测试通知验证。',
+  unsupported: '当前环境不支持系统通知。', checking: '正在检查通知权限…',
+  enable: '允许通知', refresh: '重新检查', settings: '打开系统通知设置',
+  browserHint: '如果已拒绝，请在浏览器的站点设置中允许通知。',
+  test: '发送测试通知', testing: '正在发送…',
+  testTitle: 'DSH 通知测试', testBody: '通知已连通，点击这条通知可回到 DSH。',
+  testSent: '系统已接收测试通知。',
+  rateLimited: '发送过于频繁，请稍后重试。', activeLimit: '当前通知数量已达上限，请关闭部分通知后重试。',
+  failed: '通知未能显示，请检查系统通知设置。',
+}
+export type NotificationKey = keyof typeof zh
+export const en: Record<NotificationKey, string> = {
+  nav: 'Notifications',
+  description: 'Get notified when a turn finishes or needs approval or an answer. Click a notification to return to its session.',
+  desktop: 'Desktop system notifications', browser: 'Browser notifications',
+  granted: 'Notifications allowed', denied: 'Notifications blocked', pending: 'Notifications not yet allowed',
+  unknown: 'System notification status is unavailable. Send a test notification to check delivery.',
+  unsupported: 'This environment does not support system notifications.', checking: 'Checking notification permission…',
+  enable: 'Allow notifications', refresh: 'Check again', settings: 'Open system notification settings',
+  browserHint: 'If access was denied, allow notifications in the browser’s site settings.',
+  test: 'Send test notification', testing: 'Sending…',
+  testTitle: 'DSH notification test', testBody: 'Notifications are connected. Click this notification to return to DSH.',
+  testSent: 'The system accepted the test notification.',
+  rateLimited: 'Notifications are being sent too quickly. Try again shortly.', activeLimit: 'Close some active notifications and try again.',
+  failed: 'The notification could not be shown. Check system notification settings.',
+}

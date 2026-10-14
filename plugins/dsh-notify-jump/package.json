@@ -1,0 +1,71 @@
+{
+  "name": "@just-genius/dsh-notify-jump",
+  "description": "Jump to the session on notification click; also notify on approval/ask waits",
+  "version": "0.1.1",
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "types": "./lib/client.d.ts",
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-api-session-controller",
+        "@deepseek-ai/dsh-api-workspace-controller",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-chat",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-session",
+        "@deepseek-ai/dsh-client-ui-workspace",
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-primitives",
+        "@deepseek-ai/dsh-client-ui-settings"
+      ],
+      "platform": "web"
+    },
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "files": [
+    "lib/index.js",
+    "lib/client.js",
+    "cordis.patch.yml",
+    "lib/**/*.d.ts"
+  ],
+  "scripts": {
+    "build": "tsdown -c tsdown.config.ts && tsdown -c tsdown.client.config.ts",
+    "watch": "tsdown -c tsdown.config.ts --watch & tsdown -c tsdown.client.config.ts --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --config vitest.config.ts",
+    "build:desktop": "node scripts/build-desktop.mjs",
+    "test:desktop": "node --test test/desktop-package.test.mjs",
+    "clean": "rm -rf lib"
+  },
+  "dependencies": {
+    "@just-genius/dsh-plugin-runtime": "workspace:*"
+  },
+  "peerDependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  },
+  "devDependencies": {
+    "@just-genius/dsh-plugin-ui": "workspace:*",
+    "@types/node": "^22.0.0",
+    "@types/react": "~18.3.1",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0"
+  }
+}
