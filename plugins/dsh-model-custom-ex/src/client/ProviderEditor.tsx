@@ -24,6 +24,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import type { SettingsNamespaceView, SettingsPathOpView } from '@just-genius/dsh-plugin-runtime/client'
+import { toSettingsValue } from '@just-genius/dsh-plugin-runtime/client'
 import type { CredentialInfo, ModelsOperations } from './operations.ts'
 import {
   DeepSeekModelsEditor, modelDrafts, validateDeepSeekModels,
@@ -124,7 +125,9 @@ export function pathOps(
   const ops: SettingsPathOpView[] = []
   for (const [key, value] of Object.entries(after)) {
     if (JSON.stringify(previous[key]) === JSON.stringify(value)) continue
-    ops.push({ op: 'set', path: [...base, key], value })
+    ops.push(value === undefined
+      ? { op: 'unset', path: [...base, key] }
+      : { op: 'set', path: [...base, key], value: toSettingsValue(value) })
   }
   for (const key of Object.keys(previous)) {
     if (!(key in after)) ops.push({ op: 'unset', path: [...base, key] })

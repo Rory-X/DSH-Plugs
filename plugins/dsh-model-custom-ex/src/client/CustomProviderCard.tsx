@@ -23,6 +23,7 @@
 
 import { useState } from 'react'
 import type { ReactNode } from 'react'
+import { toSettingsValue } from '@just-genius/dsh-plugin-runtime/client'
 import type { ModelsOperations } from './operations.ts'
 import { apiKeyFailure } from './apiKey.ts'
 import { writeProviderDefaults } from './defaults.ts'
@@ -155,7 +156,7 @@ export function CustomProviderCard(props: CustomProviderCardProps): ReactNode {
       }
       const response = await operations.writeSettings(
         NS,
-        [{ op: 'set', path: ['providers', route], value: profile }],
+        [{ op: 'set', path: ['providers', route], value: toSettingsValue(profile) }],
         // `taken` is a snapshot too, so the id check alone cannot see a route
         // declared after this card opened; the revision makes that race a
         // conflict instead of a write over the other profile.

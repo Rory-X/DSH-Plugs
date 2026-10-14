@@ -1,5 +1,7 @@
 # @just-genius/dsh-model-custom-ex
 
+> **Official Desktop 0.1.7-rc.2:** use the separate [Desktop build and installation guide](./README.desktop.md). It builds from the installed official editor and adds inline effort controls and capacity presets to Edit. The remaining instructions on this page describe the legacy Web replacement only.
+
 A fork of the official Models settings page (`@deepseek-ai/dsh-client-ui-settings-models`) that adds the two per-model controls the stock page punts to `settings.yaml`: **vision** (`input`) and **thinking strength** (`reasoningEfforts`).
 
 ![Custom Models settings](../../public/model-custom-ex.png)
