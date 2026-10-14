@@ -4,7 +4,12 @@
 import type {} from '@deepseek-ai/dsh-api-remotes/client'
 import type {} from '@deepseek-ai/dsh-client-connection/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
-import type {} from '@deepseek-ai/dsh-client-runtime/client'
+import type {} from '@deepseek-ai/dsh-api-session-controller/client'
+import type {} from '@deepseek-ai/dsh-api-workspace-controller/client'
+import type {} from '@deepseek-ai/dsh-client-ui-chat/client'
+import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
+import type {} from '@deepseek-ai/dsh-client-ui-session/client'
+import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-input-trigger/client'
 import type {} from '@deepseek-ai/dsh-client-ui-layout/client'
@@ -18,7 +23,12 @@ import type {} from '@deepseek-ai/dsh-client-ui-slots'
 export type {} from '@deepseek-ai/dsh-api-remotes/client'
 export type {} from '@deepseek-ai/dsh-client-connection/client'
 export type {} from '@deepseek-ai/dsh-client-locale/client'
-export type {} from '@deepseek-ai/dsh-client-runtime/client'
+export type {} from '@deepseek-ai/dsh-api-session-controller/client'
+export type {} from '@deepseek-ai/dsh-api-workspace-controller/client'
+export type {} from '@deepseek-ai/dsh-client-ui-chat/client'
+export type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
+export type {} from '@deepseek-ai/dsh-client-ui-session/client'
+export type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
 export type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 export type {} from '@deepseek-ai/dsh-client-ui-input-trigger/client'
 export type {} from '@deepseek-ai/dsh-client-ui-layout/client'
@@ -29,13 +39,14 @@ export type {} from '@deepseek-ai/dsh-client-ui-slots'
 
 import type { ClientRemote } from '@deepseek-ai/dsh-api-remotes/client'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-client-connection/client'
-import type {
-  ClientContext,
-  ConversationNodeDefinition,
-  ISessions,
-  IWorkspaces,
-  SnapshotStore,
-} from '@deepseek-ai/dsh-client-runtime/client'
+import type { Context as ClientContext } from '@deepseek-ai/cordis'
+import type { ISessions } from '@deepseek-ai/dsh-api-session-controller/client'
+import type { IWorkspaces } from '@deepseek-ai/dsh-api-workspace-controller/client'
+import type { UiSession } from '@deepseek-ai/dsh-client-ui-session/client'
+import { resolvePendingInteractions, type UiSessionNotificationFace, type SessionStatusSource } from './session-status'
+import type { SettingsPathOpView } from '@deepseek-ai/dsh-settings/types'
+import type { ConversationNodeDefinition } from '@deepseek-ai/dsh-client-ui-conversation/client'
+import type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
 import type {
   SessionEvent as CoreSessionEvent,
   SurfaceEvent,
@@ -173,52 +184,50 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface SlotMap extends PluginSlotMap {}
 }
 
-declare module '@deepseek-ai/dsh-client-ui-conversation/client' {
+declare module '@deepseek-ai/dsh-client-ui-chat/client' {
   interface ChatNodeDataMap extends PluginChatNodeDataMap {}
 }
 
 export type {
   AssistantBlock,
   ChatConversationViewNode,
-  ClientContext,
-  ConversationEventRegistry,
-  ConversationNodeDefinition,
   ConversationNode,
-  ConversationSnapshot,
-  ISessions,
-  IWorkspaces,
-  PendingInteraction,
-  PendingWait,
   RunningToolCall,
+  TurnTailOwnerProps,
+} from '@deepseek-ai/dsh-client-ui-chat/client'
+export type { Context as ClientContext } from '@deepseek-ai/cordis'
+export type { ConversationEventRegistry, ConversationNodeDefinition } from '@deepseek-ai/dsh-client-ui-conversation/client'
+export type {
+  ISessions,
   SessionBinding,
   SessionFace,
-  SessionId,
   SessionListState,
   SessionSummary,
-  SettingsScope,
-  SnapshotStore,
-  UseConversationSession,
-  WorkspaceId,
-} from '@deepseek-ai/dsh-client-runtime/client'
+} from '@deepseek-ai/dsh-api-session-controller/client'
+export type { IWorkspaces, WorkspaceId } from '@deepseek-ai/dsh-api-workspace-controller/client'
+export type { SessionId } from '@deepseek-ai/dsh-session/types'
+export type { SnapshotStore } from '@deepseek-ai/dsh-client-store'
+export type { SettingsScope } from '@deepseek-ai/dsh-client-ui-settings/client'
+export type { UseSession as UseConversationSession } from '@deepseek-ai/dsh-client-ui-session/client'
+export type { ConversationSnapshot, HistoryEntry, IApiClient, PendingInteraction, PendingWait } from './client-compat'
+export { adaptPendingInteraction } from './client-compat'
+export type { SessionStatus, SessionStatusSource } from './session-status'
+export { getDesktopNotifications } from './desktop-notifications'
+export type { DesktopNotifySpec, DesktopNotifyAction, DesktopNotifyResult, DesktopNotificationStatus, DesktopNotificationBridge } from './desktop-notifications'
 
 export type {
-  ConfigurableProviderView,
   ConnectionHandle,
-  CredentialView,
-  DiscoveredModelView,
-  HistoryEntry,
-  IApiClient,
   SessionEvent,
-  SettingsNamespaceView,
-  SettingsPathOpView,
 } from '@deepseek-ai/dsh-client-connection/client'
+export type { LlmConfigurableProvider as ConfigurableProviderView, LlmDiscoveredModel as DiscoveredModelView } from '@deepseek-ai/dsh-llm/types'
+export type { CredentialInfo as CredentialView } from '@deepseek-ai/dsh-credentials/types'
+export type { SettingsNamespaceView, SettingsPathOpView } from '@deepseek-ai/dsh-settings/types'
 
 export type { ClientRemote } from '@deepseek-ai/dsh-api-remotes/client'
 export type {
   InputTriggerSource,
   ReferenceInsert,
 } from '@deepseek-ai/dsh-client-ui-input-trigger/client'
-export type { TurnTailOwnerProps } from '@deepseek-ai/dsh-client-ui-conversation/client'
 export type {
   InjectFace,
   PropsLocale,
@@ -367,6 +376,8 @@ export const CLIENT_SERVICES = {
   conversationEvents: 'conversationEvents',
   /** Conversation registries (`events` / `views`) since DSH 0.1.2. */
   uiConversation: 'uiConversation',
+  uiSession: 'uiSession',
+  uiWorkspace: 'uiWorkspace',
   inputTriggers: 'inputTriggers',
   locale: 'locale',
   modelDirectories: 'modelDirectories',
@@ -419,6 +430,24 @@ export function getRemote(ctx: ClientContext): ClientRemote {
 
 export function getSessions(ctx: ClientContext): ISessions {
   return ctx.sessions
+}
+
+export type PendingInteractionsSource = UiSession['pendingInteractions']
+
+export function getPendingInteractions(ctx: ClientContext): PendingInteractionsSource {
+  return resolvePendingInteractions(ctx.uiSession as unknown as UiSessionNotificationFace)
+}
+
+/** Live activity feed on official DSH Desktop 0.2; older Web builds use the list. */
+export function getSessionStatus(ctx: ClientContext): SessionStatusSource | undefined {
+  return (ctx.uiSession as unknown as UiSessionNotificationFace).sessionStatus
+}
+
+/** Normalize plugin drafts to the JSON values accepted by settings transport. */
+export function toSettingsValue(value: unknown): Extract<SettingsPathOpView, { op: 'set' }>['value'] {
+  const json = JSON.stringify(value)
+  if (json === undefined) throw new TypeError('settings value must be JSON serializable')
+  return JSON.parse(json)
 }
 
 export function getWorkspaces(ctx: ClientContext): IWorkspaces {

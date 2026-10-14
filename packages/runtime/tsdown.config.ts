@@ -5,6 +5,7 @@ export default defineConfig({
     index: 'src/index.ts',
     host: 'src/host.ts',
     client: 'src/client.ts',
+    websocket: 'src/websocket.ts',
   },
   format: 'esm',
   dts: true,
