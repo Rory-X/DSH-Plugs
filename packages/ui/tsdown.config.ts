@@ -14,6 +14,7 @@ export default defineConfig([
     entry: {
       index: 'src/index.tsx',
       'official-primitives': 'src/official-primitives.ts',
+      'icons-dom': 'src/icons/dom.ts',
     },
     format: 'esm',
     dts: true,

@@ -450,6 +450,13 @@ export const IconRightUpOutline16 = ({ size = 16, className }: IconProps) => (
   </svg>
 )
 
+/** Open a destination in its main window, with inset geometry for compact controls. */
+export const IconOpenInWindowOutline16 = ({ size = 16, className }: IconProps) => (
+  <svg width={size} height={size} className={className} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <path d="M7 3H4.25A1.25 1.25 0 0 0 3 4.25V11.75A1.25 1.25 0 0 0 4.25 13H11.75A1.25 1.25 0 0 0 13 11.75V9M9.5 2.5H13.5V6.5M13.5 2.5L7.5 8.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+)
+
 /** ic_ds_enhance_outline_16 */
 export const IconEnhanceOutline16 = ({ size = 16, className }: IconProps) => (
   <svg width={size} height={size} className={className} viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">

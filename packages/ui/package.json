@@ -12,6 +12,10 @@
       "types": "./lib/official-primitives.d.ts",
       "import": "./lib/official-primitives.js"
     },
+    "./icons-dom": {
+      "types": "./lib/icons-dom.d.ts",
+      "import": "./lib/icons-dom.js"
+    },
     "./theme.css": "./src/theme/all.css",
     "./css-modules": {
       "types": "./lib/css-modules.d.ts",
@@ -25,12 +29,12 @@
   ],
   "scripts": {
     "sync-theme": "node scripts/sync-theme.mjs",
-    "build": "tsdown",
+    "build": "node scripts/generate-icon-svgs.mjs && tsdown",
     "typecheck": "tsc --noEmit",
     "clean": "rm -rf lib"
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-client-ui-primitives": "0.1.5-rc.1",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.1.5-rc.2",
     "react": ">=18.2.0",
     "react-dom": ">=18.2.0"
   },
@@ -41,7 +45,7 @@
     "markdown-it": "^14.1.0"
   },
   "devDependencies": {
-    "@deepseek-ai/dsh-client-ui-primitives": "0.1.5-rc.1",
+    "@deepseek-ai/dsh-client-ui-primitives": "0.1.5-rc.2",
     "@types/node": "^22.0.0",
     "@types/react": "~18.3.1",
     "@types/react-dom": "~18.3.0",
